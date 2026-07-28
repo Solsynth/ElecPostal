@@ -33,6 +33,8 @@ type App struct {
 	grpcLn   net.Listener
 }
 
+const healthServiceName = "elecpostal"
+
 // New creates a new App from configuration.
 func New(cfg *config.Config) (*App, error) {
 	db, err := database.Open(cfg)
@@ -92,7 +94,10 @@ func New(cfg *config.Config) (*App, error) {
 	}
 	grpcSrv := grpc.NewServer(grpcOpts...)
 	healthServer := health.NewServer()
+	// Publish both the standard aggregate status and the service-specific name.
+	// Gateways vary between checking an empty service name and an explicit one.
 	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+	healthServer.SetServingStatus(healthServiceName, healthpb.HealthCheckResponse_SERVING)
 	healthpb.RegisterHealthServer(grpcSrv, healthServer)
 	reflection.Register(grpcSrv)
 

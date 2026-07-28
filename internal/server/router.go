@@ -21,7 +21,7 @@ func NewRouter(cfg *config.Config, emailSvc *service.EmailService) *gin.Engine {
 	r.Use(authMiddleware(cfg))
 
 	r.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"ok": true})
+		c.JSON(http.StatusOK, gin.H{"ok": true, "service": "elecpostal"})
 	})
 
 	api := r.Group("/api")

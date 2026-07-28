@@ -175,5 +175,10 @@ logins with that secret.
 Returns:
 
 ```json
-{"ok":true}
+{"ok":true,"service":"elecpostal"}
 ```
+
+ElecPostal also implements the standard gRPC health service on the configured
+gRPC port (default `9090`). Gateways may check either the aggregate service name
+`""` or the explicit service name `"elecpostal"`; both report `SERVING` after
+startup.
