@@ -1,0 +1,32 @@
+app = { name = "ElecPostal" }
+
+[http]
+port = "8080"
+
+[grpc]
+port = "9090"
+useTLS = false
+certFile = ""
+keyFile = ""
+
+[database]
+dsn = "host=postgres port=5432 user=dyson password=dyson dbname=elec_postal sslmode=disable"
+
+[redis]
+addr = ""
+
+[auth]
+target = ""              # Solar auth gRPC target (host:port); leave empty to disable auth
+useTLS = false
+tlsSkipVerify = false
+
+[solarNetwork]
+baseUrl = ""             # Solar Network API base URL (e.g. https://api.dyson.example)
+accessToken = ""         # Bearer token for Solar Network API calls
+accountName = ""         # Bot account name for websocket identification
+
+[sentry]
+dsn = ""
+tracesSampleRate = 0.01
+environment = ""
+release = ""
