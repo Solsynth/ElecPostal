@@ -39,24 +39,24 @@ func NewSESAdapter(ctx context.Context, cfg SESConfig) (*SESAdapter, error) {
 	return &SESAdapter{client: sesv2.NewFromConfig(awsCfg)}, nil
 }
 
-func (a *SESAdapter) Send(ctx context.Context, message Message) error {
+func (a *SESAdapter) Send(ctx context.Context, message Message) (DeliveryResult, error) {
 	if len(message.AttachmentIDs) > 0 {
-		return ErrAttachmentSourceRequired
+		return DeliveryResult{}, ErrAttachmentSourceRequired
 	}
 	recipients, err := envelopeRecipients(message)
 	if err != nil {
-		return err
+		return DeliveryResult{}, err
 	}
 	if len(recipients) > 50 {
-		return fmt.Errorf("SES accepts at most 50 recipients per message")
+		return DeliveryResult{}, fmt.Errorf("SES accepts at most 50 recipients per message")
 	}
 	from, err := mail.ParseAddress(message.FromAddress)
 	if err != nil || from.Address == "" {
-		return fmt.Errorf("invalid sender address %q", message.FromAddress)
+		return DeliveryResult{}, fmt.Errorf("invalid sender address %q", message.FromAddress)
 	}
 	from.Name = message.FromName
 
-	_, err = a.client.SendEmail(ctx, &sesv2.SendEmailInput{
+	output, err := a.client.SendEmail(ctx, &sesv2.SendEmailInput{
 		FromEmailAddress: aws.String(from.String()),
 		Destination: &types.Destination{
 			ToAddresses:  message.To,
@@ -69,9 +69,9 @@ func (a *SESAdapter) Send(ctx context.Context, message Message) error {
 		}},
 	})
 	if err != nil {
-		return fmt.Errorf("send email with SES: %w", err)
+		return DeliveryResult{}, fmt.Errorf("send email with SES: %w", err)
 	}
-	return nil
+	return DeliveryResult{ProviderMessageID: aws.ToString(output.MessageId)}, nil
 }
 
 func (a *SESAdapter) Close() error { return nil }

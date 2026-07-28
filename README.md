@@ -30,6 +30,7 @@ Key settings:
 - `auth.useTLS`
 - `filesystem.target` (optional FileSystem gRPC endpoint for inbound email attachments)
 - `ring.target` (optional Ring gRPC endpoint for account notifications)
+- `mail.domain` (canonical mail domain; local-only mailbox addresses are completed with this domain before outbound delivery and exposed via `GET /api/mail/host`)
 
 ## Attachments
 

@@ -26,13 +26,13 @@ func NewLocalMXRouter(inboundHost string, localDelivery func(context.Context, Me
 	}
 }
 
-func (r *LocalMXRouter) Send(ctx context.Context, message Message) error {
+func (r *LocalMXRouter) Send(ctx context.Context, message Message) (DeliveryResult, error) {
 	if r.localDelivery == nil || strings.TrimSpace(r.inboundHost) == "" {
 		return r.fallback.Send(ctx, message)
 	}
 	recipients, err := envelopeRecipients(message)
 	if err != nil {
-		return err
+		return DeliveryResult{}, err
 	}
 	byDomain := make(map[string][]string)
 	for _, recipient := range recipients {
@@ -48,7 +48,7 @@ func (r *LocalMXRouter) Send(ctx context.Context, message Message) error {
 			continue
 		}
 		if err := r.localDelivery(ctx, message, domainRecipients); err != nil {
-			return err
+			return DeliveryResult{}, err
 		}
 		for _, recipient := range domainRecipients {
 			localRecipients[strings.ToLower(recipient)] = struct{}{}
@@ -57,7 +57,7 @@ func (r *LocalMXRouter) Send(ctx context.Context, message Message) error {
 
 	external := excludeRecipients(message, localRecipients)
 	if len(external.To)+len(external.Cc)+len(external.Bcc) == 0 {
-		return nil
+		return DeliveryResult{}, nil
 	}
 	return r.fallback.Send(ctx, external)
 }

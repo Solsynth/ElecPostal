@@ -22,9 +22,15 @@ type Message struct {
 	AttachmentIDs []string
 }
 
+// DeliveryResult is provider metadata returned after an outbound provider has
+// accepted a message. Acceptance does not guarantee final recipient delivery.
+type DeliveryResult struct {
+	ProviderMessageID string
+}
+
 // Adapter delivers an outbound message through a provider such as SES.
 type Adapter interface {
-	Send(context.Context, Message) error
+	Send(context.Context, Message) (DeliveryResult, error)
 	Close() error
 }
 
@@ -32,8 +38,10 @@ type Adapter interface {
 // existing persistence-only behaviour until an adapter is explicitly enabled.
 type DisabledAdapter struct{}
 
-func (DisabledAdapter) Send(context.Context, Message) error { return nil }
-func (DisabledAdapter) Close() error                        { return nil }
+func (DisabledAdapter) Send(context.Context, Message) (DeliveryResult, error) {
+	return DeliveryResult{}, nil
+}
+func (DisabledAdapter) Close() error { return nil }
 
 // ErrAttachmentSourceRequired prevents a provider adapter from silently
 // dropping attachment IDs when it lacks a configured DysonFS byte source.

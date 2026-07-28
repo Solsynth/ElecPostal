@@ -24,7 +24,7 @@ func TestLocalMXRouterDeliversLocalRecipientsAndRelaysTheRest(t *testing.T) {
 		return []*net.MX{{Host: "remote.test."}}, nil
 	}
 
-	if err := router.Send(context.Background(), Message{
+	if _, err := router.Send(context.Background(), Message{
 		FromAddress: "sender@example.test",
 		To:          []string{"local@local.test", "remote@remote.test"},
 	}); err != nil {
@@ -40,5 +40,7 @@ func TestLocalMXRouterDeliversLocalRecipientsAndRelaysTheRest(t *testing.T) {
 
 type adapterFunc func(context.Context, Message) error
 
-func (f adapterFunc) Send(ctx context.Context, message Message) error { return f(ctx, message) }
-func (adapterFunc) Close() error                                      { return nil }
+func (f adapterFunc) Send(ctx context.Context, message Message) (DeliveryResult, error) {
+	return DeliveryResult{}, f(ctx, message)
+}
+func (adapterFunc) Close() error { return nil }

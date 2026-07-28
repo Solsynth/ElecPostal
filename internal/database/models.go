@@ -34,21 +34,26 @@ func (m *Mailbox) BeforeCreate(tx *gorm.DB) error {
 
 // Email stores a single email message.
 type Email struct {
-	ID          string         `gorm:"primaryKey;size:36" json:"id"`
-	AccountID   uuid.UUID      `gorm:"index:idx_emails_account_id" json:"account_id"`
-	MailboxID   string         `gorm:"index:idx_emails_mailbox_id;size:36" json:"mailbox_id"`
-	ThreadID    *string        `gorm:"index:idx_emails_thread_id;size:36" json:"thread_id,omitempty"`
-	Subject     string         `gorm:"size:512" json:"subject"`
-	Body        string         `gorm:"type:text" json:"body"`
-	FromAddress string         `gorm:"size:255" json:"from_address"`
-	FromName    string         `gorm:"size:128" json:"from_name"`
-	IsRead      bool           `json:"is_read"`
-	IsStarred   bool           `json:"is_starred"`
-	IsDraft     bool           `gorm:"index:idx_emails_is_draft" json:"is_draft"`
-	SentAt      *time.Time     `json:"sent_at,omitempty"`
-	DeletedAt   gorm.DeletedAt `gorm:"index" json:"deleted_at"`
-	CreatedAt   time.Time      `json:"created_at"`
-	UpdatedAt   time.Time      `json:"updated_at"`
+	ID                    string         `gorm:"primaryKey;size:36" json:"id"`
+	AccountID             uuid.UUID      `gorm:"index:idx_emails_account_id" json:"account_id"`
+	MailboxID             string         `gorm:"index:idx_emails_mailbox_id;size:36" json:"mailbox_id"`
+	ThreadID              *string        `gorm:"index:idx_emails_thread_id;size:36" json:"thread_id,omitempty"`
+	Subject               string         `gorm:"size:512" json:"subject"`
+	Body                  string         `gorm:"type:text" json:"body"`
+	FromAddress           string         `gorm:"size:255" json:"from_address"`
+	FromName              string         `gorm:"size:128" json:"from_name"`
+	IsRead                bool           `json:"is_read"`
+	IsStarred             bool           `json:"is_starred"`
+	IsDraft               bool           `gorm:"index:idx_emails_is_draft" json:"is_draft"`
+	SentAt                *time.Time     `json:"sent_at,omitempty"`
+	DeliveryStatus        string         `gorm:"index;size:32" json:"delivery_status"`
+	DeliveryAttempts      int            `json:"delivery_attempts"`
+	LastDeliveryAttemptAt *time.Time     `json:"last_delivery_attempt_at,omitempty"`
+	DeliveryError         *string        `gorm:"type:text" json:"delivery_error,omitempty"`
+	ProviderMessageID     *string        `gorm:"size:255" json:"provider_message_id,omitempty"`
+	DeletedAt             gorm.DeletedAt `gorm:"index" json:"deleted_at"`
+	CreatedAt             time.Time      `json:"created_at"`
+	UpdatedAt             time.Time      `json:"updated_at"`
 
 	Mailbox     *Mailbox     `gorm:"foreignKey:MailboxID;references:ID" json:"mailbox,omitempty"`
 	Recipients  []Recipient  `gorm:"foreignKey:EmailID;references:ID" json:"recipients,omitempty"`

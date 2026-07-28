@@ -45,17 +45,17 @@ func NewDirectSMTPAdapter(cfg DirectSMTPConfig) (*DirectSMTPAdapter, error) {
 	}, nil
 }
 
-func (a *DirectSMTPAdapter) Send(ctx context.Context, message Message) error {
+func (a *DirectSMTPAdapter) Send(ctx context.Context, message Message) (DeliveryResult, error) {
 	if len(message.AttachmentIDs) > 0 {
-		return ErrAttachmentSourceRequired
+		return DeliveryResult{}, ErrAttachmentSourceRequired
 	}
 	from, err := mail.ParseAddress(message.FromAddress)
 	if err != nil || from.Address == "" {
-		return fmt.Errorf("invalid sender address %q", message.FromAddress)
+		return DeliveryResult{}, fmt.Errorf("invalid sender address %q", message.FromAddress)
 	}
 	recipients, err := envelopeRecipients(message)
 	if err != nil {
-		return err
+		return DeliveryResult{}, err
 	}
 	byDomain := make(map[string][]string)
 	for _, recipient := range recipients {
@@ -65,10 +65,10 @@ func (a *DirectSMTPAdapter) Send(ctx context.Context, message Message) error {
 	data := formatMessage(message)
 	for domain, domainRecipients := range byDomain {
 		if err := a.deliverDomain(ctx, from.Address, domain, domainRecipients, data, message); err != nil {
-			return fmt.Errorf("deliver to %s: %w", domain, err)
+			return DeliveryResult{}, fmt.Errorf("deliver to %s: %w", domain, err)
 		}
 	}
-	return nil
+	return DeliveryResult{}, nil
 }
 
 func (a *DirectSMTPAdapter) deliverDomain(ctx context.Context, from, domain string, recipients []string, data []byte, message Message) error {

@@ -2,7 +2,7 @@
 
 Base path: `/api`
 
-All endpoints except `/health` require an authenticated account. Send a Solar
+All endpoints except `/health` and `/api/mail/host` require an authenticated account. Send a Solar
 access token using the normal `Authorization` header. For local development,
 when authentication is disabled, `X-Account-Id` may be used with an account UUID.
 
@@ -11,6 +11,21 @@ Errors have this shape:
 ```json
 {"error":"description"}
 ```
+
+## Configuration
+
+### Mail host
+
+`GET /api/mail/host`
+
+Returns the configured canonical mail domain. Clients can use it to render
+local-only mailbox addresses as full email addresses.
+
+```json
+{"host":"example.com"}
+```
+
+When no domain is configured, `host` is an empty string.
 
 ## Mailboxes
 
@@ -95,6 +110,18 @@ default when it is omitted.
 
 Returns `201 Created` with the stored email.
 
+Non-draft emails include delivery metadata: `delivery_status` (`pending`,
+`sent`, `failed`, or `not_configured`), `delivery_attempts`, the last attempt
+time, an optional provider message ID, and an error when delivery failed.
+
+### Resend an email
+
+`POST /api/emails/{email-id}/resend`
+
+Retries a previously sent email using its original recipients and content. The
+email's delivery status, attempt counter, provider message ID, and any delivery
+error are updated. Drafts cannot be resent.
+
 ### Delete an email
 
 `DELETE /api/emails/{email-id}`
@@ -107,10 +134,10 @@ Soft-deletes the email and returns:
 
 ## Delivery behavior
 
-When the service is configured with the `direct-smtp` outbound adapter,
-non-draft messages are delivered directly to recipient MX records. Delivery
-errors are returned by `POST /api/emails`; a message is not persisted when
-direct delivery fails. Messages with `attachment_ids` are rejected while no
+When an outbound adapter is configured, non-draft messages are delivered to the
+recipient provider or MX records. Every attempt is persisted. On failure the
+message remains available with a `failed` delivery status and can be retried
+with the resend endpoint. Messages with `attachment_ids` are rejected while no
 DysonFS attachment-byte source is configured, preventing attachments from being
 silently omitted.
 

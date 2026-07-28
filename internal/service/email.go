@@ -255,22 +255,20 @@ func (s *EmailService) SendEmail(ctx context.Context, accountID uuid.UUID, input
 
 	fromAddress := s.normalizeFromAddress(mailbox.Address)
 	email := database.Email{
-		AccountID:   accountID,
-		MailboxID:   input.MailboxID,
-		Subject:     input.Subject,
-		Body:        input.Body,
-		FromAddress: fromAddress,
-		FromName:    mailbox.Name,
-		IsDraft:     input.IsDraft,
+		AccountID:      accountID,
+		MailboxID:      input.MailboxID,
+		Subject:        input.Subject,
+		Body:           input.Body,
+		FromAddress:    fromAddress,
+		FromName:       mailbox.Name,
+		IsDraft:        input.IsDraft,
+		DeliveryStatus: "draft",
 	}
 	if !input.IsDraft {
-		if s.relay != nil {
-			if err := s.relay.Send(ctx, outgoingRelayMessage(mailbox, fromAddress, input)); err != nil {
-				return nil, fmt.Errorf("deliver email: %w", err)
-			}
-		}
+		email.DeliveryStatus = "pending"
 		now := time.Now()
-		email.SentAt = &now
+		email.LastDeliveryAttemptAt = &now
+		email.DeliveryAttempts = 1
 	}
 
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -306,8 +304,85 @@ func (s *EmailService) SendEmail(ctx context.Context, accountID uuid.UUID, input
 	if err != nil {
 		return nil, err
 	}
+	if input.IsDraft {
+		return &email, nil
+	}
+	if err := s.deliverStoredEmail(ctx, &email, outgoingRelayMessage(mailbox, fromAddress, input)); err != nil {
+		return nil, err
+	}
 
 	return &email, nil
+}
+
+// ResendEmail retries an existing non-draft outbound message. The delivery
+// fields on that message record are updated for each attempt.
+func (s *EmailService) ResendEmail(ctx context.Context, accountID uuid.UUID, id string) (*database.Email, error) {
+	var email database.Email
+	if err := s.db.WithContext(ctx).Where("id = ? AND account_id = ?", id, accountID).
+		Preload("Mailbox").Preload("Recipients").Preload("Attachments").First(&email).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	if email.IsDraft {
+		return nil, fmt.Errorf("draft emails cannot be resent")
+	}
+	now := time.Now()
+	email.DeliveryStatus = "pending"
+	email.DeliveryError = nil
+	email.LastDeliveryAttemptAt = &now
+	email.DeliveryAttempts++
+	if err := s.db.WithContext(ctx).Model(&email).Updates(map[string]any{
+		"delivery_status":          email.DeliveryStatus,
+		"delivery_error":           nil,
+		"last_delivery_attempt_at": now,
+		"delivery_attempts":        email.DeliveryAttempts,
+	}).Error; err != nil {
+		return nil, err
+	}
+	if err := s.deliverStoredEmail(ctx, &email, relayMessageFromEmail(email)); err != nil {
+		return nil, err
+	}
+	return &email, nil
+}
+
+func (s *EmailService) deliverStoredEmail(ctx context.Context, email *database.Email, message relay.Message) error {
+	if s.relay == nil {
+		return s.recordDeliveryFailure(ctx, email, "no outbound relay is configured", "not_configured")
+	}
+	result, err := s.relay.Send(ctx, message)
+	if err != nil {
+		return s.recordDeliveryFailure(ctx, email, err.Error(), "failed")
+	}
+	now := time.Now()
+	email.DeliveryStatus = "sent"
+	email.DeliveryError = nil
+	email.SentAt = &now
+	if result.ProviderMessageID != "" {
+		email.ProviderMessageID = &result.ProviderMessageID
+	}
+	if err := s.db.WithContext(ctx).Model(email).Updates(map[string]any{
+		"delivery_status":     email.DeliveryStatus,
+		"delivery_error":      nil,
+		"sent_at":             now,
+		"provider_message_id": email.ProviderMessageID,
+	}).Error; err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *EmailService) recordDeliveryFailure(ctx context.Context, email *database.Email, message, status string) error {
+	email.DeliveryStatus = status
+	email.DeliveryError = &message
+	if err := s.db.WithContext(ctx).Model(email).Updates(map[string]any{
+		"delivery_status": status,
+		"delivery_error":  message,
+	}).Error; err != nil {
+		return err
+	}
+	return fmt.Errorf("deliver email: %s", message)
 }
 
 func outgoingRelayMessage(mailbox database.Mailbox, fromAddress string, input SendEmailInput) relay.Message {
@@ -326,6 +401,31 @@ func outgoingRelayMessage(mailbox database.Mailbox, fromAddress string, input Se
 	}
 	for _, recipient := range input.Bcc {
 		message.Bcc = append(message.Bcc, recipient.Address)
+	}
+	return message
+}
+
+func relayMessageFromEmail(email database.Email) relay.Message {
+	message := relay.Message{
+		FromAddress: email.FromAddress,
+		FromName:    email.FromName,
+		Subject:     email.Subject,
+		Body:        email.Body,
+	}
+	for _, recipient := range email.Recipients {
+		switch recipient.Kind {
+		case "cc":
+			message.Cc = append(message.Cc, recipient.Address)
+		case "bcc":
+			message.Bcc = append(message.Bcc, recipient.Address)
+		default:
+			message.To = append(message.To, recipient.Address)
+		}
+	}
+	for _, attachment := range email.Attachments {
+		if attachment.StorageKey != nil {
+			message.AttachmentIDs = append(message.AttachmentIDs, *attachment.StorageKey)
+		}
 	}
 	return message
 }

@@ -31,7 +31,7 @@ func TestDirectSMTPAdapterDeliversLocallyWhenMXMatchesHostname(t *testing.T) {
 		return nil, fmt.Errorf("SMTP dial must not occur for a local MX")
 	}
 
-	err = adapter.Send(context.Background(), Message{
+	_, err = adapter.Send(context.Background(), Message{
 		FromAddress: "sender@elsewhere.test",
 		To:          []string{"user@example.com"},
 		Subject:     "local",

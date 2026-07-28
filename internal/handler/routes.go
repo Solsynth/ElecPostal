@@ -26,6 +26,7 @@ func RegisterRoutes(r *gin.RouterGroup, emailSvc *service.EmailService) {
 		emails.GET("", func(c *gin.Context) { listEmails(c, emailSvc) })
 		emails.POST("", func(c *gin.Context) { sendEmail(c, emailSvc) })
 		emails.GET("/:id", func(c *gin.Context) { getEmail(c, emailSvc) })
+		emails.POST("/:id/resend", func(c *gin.Context) { resendEmail(c, emailSvc) })
 		emails.DELETE("/:id", func(c *gin.Context) { deleteEmail(c, emailSvc) })
 		emails.POST("/:id/read", func(c *gin.Context) { markRead(c, emailSvc, true) })
 		emails.POST("/:id/unread", func(c *gin.Context) { markRead(c, emailSvc, false) })
@@ -138,6 +139,19 @@ func getEmail(c *gin.Context, emailSvc *service.EmailService) {
 	}
 
 	email, err := emailSvc.GetEmail(c.Request.Context(), uuid.MustParse(accountID), c.Param("id"))
+	if err != nil {
+		renderServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, email)
+}
+
+func resendEmail(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	email, err := emailSvc.ResendEmail(c.Request.Context(), uuid.MustParse(accountID), c.Param("id"))
 	if err != nil {
 		renderServiceError(c, err)
 		return
