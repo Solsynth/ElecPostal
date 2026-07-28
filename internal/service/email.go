@@ -348,6 +348,11 @@ func (s *EmailService) ResendEmail(ctx context.Context, accountID uuid.UUID, id 
 }
 
 func (s *EmailService) deliverStoredEmail(ctx context.Context, email *database.Email, message relay.Message) error {
+	logging.Log.Info().
+		Str("email_id", email.ID).
+		Int("attempt", email.DeliveryAttempts).
+		Int("recipient_count", len(message.To)+len(message.Cc)+len(message.Bcc)).
+		Msg("delivering email")
 	if s.relay == nil {
 		return s.recordDeliveryFailure(ctx, email, "no outbound relay is configured", "not_configured")
 	}
@@ -370,6 +375,11 @@ func (s *EmailService) deliverStoredEmail(ctx context.Context, email *database.E
 	}).Error; err != nil {
 		return err
 	}
+	logging.Log.Info().
+		Str("email_id", email.ID).
+		Int("attempt", email.DeliveryAttempts).
+		Str("provider_message_id", result.ProviderMessageID).
+		Msg("email delivered")
 	return nil
 }
 
@@ -382,6 +392,12 @@ func (s *EmailService) recordDeliveryFailure(ctx context.Context, email *databas
 	}).Error; err != nil {
 		return err
 	}
+	logging.Log.Warn().
+		Str("email_id", email.ID).
+		Int("attempt", email.DeliveryAttempts).
+		Str("status", status).
+		Str("error", message).
+		Msg("email delivery failed")
 	return fmt.Errorf("deliver email: %s", message)
 }
 

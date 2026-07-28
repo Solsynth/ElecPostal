@@ -4,6 +4,8 @@ import (
 	"context"
 	"net"
 	"strings"
+
+	"src.solsynth.dev/sosys/elecpostal/internal/logging"
 )
 
 // LocalMXRouter delivers domains served by InboundHost directly and delegates
@@ -44,9 +46,14 @@ func (r *LocalMXRouter) Send(ctx context.Context, message Message) (DeliveryResu
 	localRecipients := make(map[string]struct{})
 	for domain, domainRecipients := range byDomain {
 		mxRecords, err := r.lookupMX(ctx, domain)
-		if err != nil || !hasLocalMX(mxRecords, r.inboundHost) {
+		if err != nil {
+			logging.Log.Debug().Err(err).Str("domain", domain).Msg("MX lookup failed; using external relay")
 			continue
 		}
+		if !hasLocalMX(mxRecords, r.inboundHost) {
+			continue
+		}
+		logging.Log.Info().Str("domain", domain).Int("recipient_count", len(domainRecipients)).Msg("delivering to local MX recipients")
 		if err := r.localDelivery(ctx, message, domainRecipients); err != nil {
 			return DeliveryResult{}, err
 		}
@@ -59,6 +66,7 @@ func (r *LocalMXRouter) Send(ctx context.Context, message Message) (DeliveryResu
 	if len(external.To)+len(external.Cc)+len(external.Bcc) == 0 {
 		return DeliveryResult{}, nil
 	}
+	logging.Log.Debug().Int("recipient_count", len(external.To)+len(external.Cc)+len(external.Bcc)).Msg("delivering through external relay")
 	return r.fallback.Send(ctx, external)
 }
 

@@ -10,6 +10,8 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sesv2"
 	"github.com/aws/aws-sdk-go-v2/service/sesv2/types"
+
+	"src.solsynth.dev/sosys/elecpostal/internal/logging"
 )
 
 // SESConfig controls the AWS SES API v2 adapter. Authentication is supplied by
@@ -71,6 +73,7 @@ func (a *SESAdapter) Send(ctx context.Context, message Message) (DeliveryResult,
 	if err != nil {
 		return DeliveryResult{}, fmt.Errorf("send email with SES: %w", err)
 	}
+	logging.Log.Debug().Str("provider_message_id", aws.ToString(output.MessageId)).Int("recipient_count", len(recipients)).Msg("SES accepted email")
 	return DeliveryResult{ProviderMessageID: aws.ToString(output.MessageId)}, nil
 }
 
