@@ -35,6 +35,7 @@ func (d *DB) AutoMigrate() error {
 		&Email{},
 		&Recipient{},
 		&Attachment{},
+		&MailProtocolCredential{},
 		&EmailLabel{},
 		&EmailLabelMapping{},
 	)

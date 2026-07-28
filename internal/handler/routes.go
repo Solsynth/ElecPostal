@@ -30,6 +30,13 @@ func RegisterRoutes(r *gin.RouterGroup, emailSvc *service.EmailService) {
 		emails.POST("/:id/read", func(c *gin.Context) { markRead(c, emailSvc, true) })
 		emails.POST("/:id/unread", func(c *gin.Context) { markRead(c, emailSvc, false) })
 	}
+
+	credentials := r.Group("/credentials")
+	{
+		credentials.GET("", func(c *gin.Context) { listMailCredentials(c, emailSvc) })
+		credentials.POST("", func(c *gin.Context) { createMailCredential(c, emailSvc) })
+		credentials.DELETE("/:id", func(c *gin.Context) { deleteMailCredential(c, emailSvc) })
+	}
 }
 
 func listMailboxes(c *gin.Context, emailSvc *service.EmailService) {
@@ -158,6 +165,49 @@ func markRead(c *gin.Context, emailSvc *service.EmailService, isRead bool) {
 	}
 
 	if err := emailSvc.MarkRead(c.Request.Context(), uuid.MustParse(accountID), c.Param("id"), isRead); err != nil {
+		renderServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func listMailCredentials(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	credentials, err := emailSvc.ListMailProtocolCredentials(c.Request.Context(), uuid.MustParse(accountID))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, credentials)
+}
+
+func createMailCredential(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	var input service.CreateMailProtocolCredentialInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	credential, err := emailSvc.CreateMailProtocolCredential(c.Request.Context(), uuid.MustParse(accountID), input)
+	if err != nil {
+		renderServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, credential)
+}
+
+func deleteMailCredential(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	if err := emailSvc.DeleteMailProtocolCredential(c.Request.Context(), uuid.MustParse(accountID), c.Param("id")); err != nil {
 		renderServiceError(c, err)
 		return
 	}

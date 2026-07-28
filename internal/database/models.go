@@ -83,14 +83,34 @@ func (r *Recipient) BeforeCreate(tx *gorm.DB) error {
 
 // Attachment stores metadata for an email attachment.
 type Attachment struct {
-	ID          string    `gorm:"primaryKey;size:36" json:"id"`
-	EmailID     string    `gorm:"index:idx_attachments_email_id;size:36" json:"email_id"`
-	Filename    string    `gorm:"size:255" json:"filename"`
-	MimeType    string    `gorm:"size:128" json:"mime_type"`
-	Size        int64     `json:"size"`
-	StorageKey  *string   `gorm:"size:128" json:"storage_key,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID         string    `gorm:"primaryKey;size:36" json:"id"`
+	EmailID    string    `gorm:"index:idx_attachments_email_id;size:36" json:"email_id"`
+	Filename   string    `gorm:"size:255" json:"filename"`
+	MimeType   string    `gorm:"size:128" json:"mime_type"`
+	Size       int64     `json:"size"`
+	StorageKey *string   `gorm:"size:128" json:"storage_key,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+// MailProtocolCredential is a revocable app password for mail protocols. Its
+// secret is stored only as a bcrypt hash and is never usable for HTTP APIs.
+type MailProtocolCredential struct {
+	ID        string         `gorm:"primaryKey;size:36" json:"id"`
+	AccountID uuid.UUID      `gorm:"index:idx_mail_protocol_credentials_account_id" json:"account_id"`
+	Label     string         `gorm:"size:128" json:"label"`
+	Hash      string         `gorm:"size:255" json:"-"`
+	Protocols datatypes.JSON `gorm:"type:jsonb" json:"protocols"`
+	DeletedAt gorm.DeletedAt `gorm:"index" json:"deleted_at"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+}
+
+func (c *MailProtocolCredential) BeforeCreate(tx *gorm.DB) error {
+	if c.ID == "" {
+		c.ID = NewID()
+	}
+	return nil
 }
 
 func (a *Attachment) BeforeCreate(tx *gorm.DB) error {

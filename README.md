@@ -39,3 +39,9 @@ file IDs as the `attachment_ids` string array to `POST /api/emails`. Inbound del
 services pass raw attachments to `EmailService.ReceiveEmail`; ElecPostal streams
 them to DysonFS under the destination mailbox's owner and workspace before it
 persists the email.
+
+## Credentials
+
+Create scoped, revocable app passwords at `POST /api/credentials` with a
+label and one or more protocols (`smtp`, `imap`, `pop3`). The returned `secret`
+is shown once and is only accepted by mail protocol listeners—not by HTTP APIs.

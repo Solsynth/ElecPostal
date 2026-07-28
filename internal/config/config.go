@@ -16,6 +16,7 @@ type Config struct {
 	Redis        RedisConfig        `mapstructure:"redis"`
 	Auth         AuthConfig         `mapstructure:"auth"`
 	FileSystem   FileSystemConfig   `mapstructure:"filesystem"`
+	Mail         MailConfig         `mapstructure:"mail"`
 	SolarNetwork SolarNetworkConfig `mapstructure:"solarNetwork"`
 	Sentry       SentryConfig       `mapstructure:"sentry"`
 }
@@ -58,6 +59,37 @@ type FileSystemConfig struct {
 	TLSSkipVerify bool   `mapstructure:"tlsSkipVerify"`
 }
 
+// MailConfig contains the network-facing mail protocol listeners and the
+// outbound relay. Protocol ports default to the registered standards; TLS mode
+// is explicit so deployments can use STARTTLS or implicit TLS where required.
+type MailConfig struct {
+	Relay RelayConfig    `mapstructure:"relay"`
+	SMTP  ListenerConfig `mapstructure:"smtp"`
+	IMAP  ListenerConfig `mapstructure:"imap"`
+	POP3  ListenerConfig `mapstructure:"pop3"`
+}
+
+type RelayConfig struct {
+	Adapter       string `mapstructure:"adapter"` // ses-smtp, or another registered adapter
+	Host          string `mapstructure:"host"`
+	Port          string `mapstructure:"port"`
+	Username      string `mapstructure:"username"`
+	Password      string `mapstructure:"password"`
+	TLSMode       string `mapstructure:"tlsMode"` // starttls, implicit, disabled
+	TLSHost       string `mapstructure:"tlsHost"`
+	TLSSkipVerify bool   `mapstructure:"tlsSkipVerify"`
+}
+
+type ListenerConfig struct {
+	Enabled       bool   `mapstructure:"enabled"`
+	Host          string `mapstructure:"host"`
+	Port          string `mapstructure:"port"`
+	TLSMode       string `mapstructure:"tlsMode"` // starttls, implicit, disabled
+	CertFile      string `mapstructure:"certFile"`
+	KeyFile       string `mapstructure:"keyFile"`
+	TLSSkipVerify bool   `mapstructure:"tlsSkipVerify"`
+}
+
 type SolarNetworkConfig struct {
 	BaseURL     string `mapstructure:"baseUrl"`
 	AccessToken string `mapstructure:"accessToken"`
@@ -89,6 +121,15 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("filesystem.target", "")
 	v.SetDefault("filesystem.useTLS", false)
 	v.SetDefault("filesystem.tlsSkipVerify", false)
+	v.SetDefault("mail.relay.adapter", "")
+	v.SetDefault("mail.relay.port", "587")
+	v.SetDefault("mail.relay.tlsMode", "starttls")
+	v.SetDefault("mail.smtp.port", "587")
+	v.SetDefault("mail.smtp.tlsMode", "starttls")
+	v.SetDefault("mail.imap.port", "143")
+	v.SetDefault("mail.imap.tlsMode", "starttls")
+	v.SetDefault("mail.pop3.port", "110")
+	v.SetDefault("mail.pop3.tlsMode", "starttls")
 	v.SetDefault("solarNetwork.baseUrl", "")
 	v.SetDefault("solarNetwork.accessToken", "")
 	v.SetDefault("solarNetwork.accountName", "")
@@ -118,6 +159,11 @@ func applyEnvOverrides(v *viper.Viper) {
 	setEnvIfPresent(v, "database.dsn", "DATABASE_DSN")
 	setEnvIfPresent(v, "auth.target", "AUTH_TARGET")
 	setEnvIfPresent(v, "filesystem.target", "FILESYSTEM_TARGET")
+	setEnvIfPresent(v, "mail.relay.adapter", "MAIL_RELAY_ADAPTER")
+	setEnvIfPresent(v, "mail.relay.host", "MAIL_RELAY_HOST")
+	setEnvIfPresent(v, "mail.relay.port", "MAIL_RELAY_PORT")
+	setEnvIfPresent(v, "mail.relay.username", "MAIL_RELAY_USERNAME")
+	setEnvIfPresent(v, "mail.relay.password", "MAIL_RELAY_PASSWORD")
 	setEnvIfPresent(v, "solarNetwork.baseUrl", "SOLAR_NETWORK_BASE_URL")
 	setEnvIfPresent(v, "solarNetwork.accessToken", "SOLAR_NETWORK_ACCESS_TOKEN")
 }
