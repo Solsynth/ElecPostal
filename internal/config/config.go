@@ -9,16 +9,16 @@ import (
 )
 
 type Config struct {
-	App          AppConfig          `mapstructure:"app"`
-	HTTP         HTTPConfig         `mapstructure:"http"`
-	GRPC         GRPCConfig         `mapstructure:"grpc"`
-	Database     DatabaseConfig     `mapstructure:"database"`
-	Redis        RedisConfig        `mapstructure:"redis"`
-	Auth         AuthConfig         `mapstructure:"auth"`
-	FileSystem   FileSystemConfig   `mapstructure:"filesystem"`
-	Mail         MailConfig         `mapstructure:"mail"`
-	SolarNetwork SolarNetworkConfig `mapstructure:"solarNetwork"`
-	Sentry       SentryConfig       `mapstructure:"sentry"`
+	App        AppConfig        `mapstructure:"app"`
+	HTTP       HTTPConfig       `mapstructure:"http"`
+	GRPC       GRPCConfig       `mapstructure:"grpc"`
+	Database   DatabaseConfig   `mapstructure:"database"`
+	Redis      RedisConfig      `mapstructure:"redis"`
+	Auth       AuthConfig       `mapstructure:"auth"`
+	FileSystem FileSystemConfig `mapstructure:"filesystem"`
+	Mail       MailConfig       `mapstructure:"mail"`
+	Ring       RingConfig       `mapstructure:"ring"`
+	Sentry     SentryConfig     `mapstructure:"sentry"`
 }
 
 type AppConfig struct {
@@ -90,10 +90,10 @@ type ListenerConfig struct {
 	TLSSkipVerify bool   `mapstructure:"tlsSkipVerify"`
 }
 
-type SolarNetworkConfig struct {
-	BaseURL     string `mapstructure:"baseUrl"`
-	AccessToken string `mapstructure:"accessToken"`
-	AccountName string `mapstructure:"accountName"`
+type RingConfig struct {
+	Target        string `mapstructure:"target"`
+	UseTLS        bool   `mapstructure:"useTLS"`
+	TLSSkipVerify bool   `mapstructure:"tlsSkipVerify"`
 }
 
 type SentryConfig struct {
@@ -130,9 +130,9 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("mail.imap.tlsMode", "starttls")
 	v.SetDefault("mail.pop3.port", "110")
 	v.SetDefault("mail.pop3.tlsMode", "starttls")
-	v.SetDefault("solarNetwork.baseUrl", "")
-	v.SetDefault("solarNetwork.accessToken", "")
-	v.SetDefault("solarNetwork.accountName", "")
+	v.SetDefault("ring.target", "")
+	v.SetDefault("ring.useTLS", false)
+	v.SetDefault("ring.tlsSkipVerify", false)
 	v.SetDefault("sentry.dsn", "")
 	v.SetDefault("sentry.tracesSampleRate", 0.01)
 	v.SetDefault("sentry.environment", "")
@@ -164,8 +164,7 @@ func applyEnvOverrides(v *viper.Viper) {
 	setEnvIfPresent(v, "mail.relay.port", "MAIL_RELAY_PORT")
 	setEnvIfPresent(v, "mail.relay.username", "MAIL_RELAY_USERNAME")
 	setEnvIfPresent(v, "mail.relay.password", "MAIL_RELAY_PASSWORD")
-	setEnvIfPresent(v, "solarNetwork.baseUrl", "SOLAR_NETWORK_BASE_URL")
-	setEnvIfPresent(v, "solarNetwork.accessToken", "SOLAR_NETWORK_ACCESS_TOKEN")
+	setEnvIfPresent(v, "ring.target", "RING_TARGET")
 }
 
 func setEnvIfPresent(v *viper.Viper, key, env string) {

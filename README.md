@@ -29,8 +29,7 @@ Key settings:
 - `auth.target`
 - `auth.useTLS`
 - `filesystem.target` (optional FileSystem gRPC endpoint for inbound email attachments)
-- `solarNetwork.baseUrl`
-- `solarNetwork.accessToken`
+- `ring.target` (optional Ring gRPC endpoint for account notifications)
 
 ## Attachments
 

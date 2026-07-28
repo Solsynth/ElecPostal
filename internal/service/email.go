@@ -15,7 +15,6 @@ import (
 	"src.solsynth.dev/sosys/elecpostal/internal/filesystem"
 	"src.solsynth.dev/sosys/elecpostal/internal/logging"
 	"src.solsynth.dev/sosys/elecpostal/internal/relay"
-	"src.solsynth.dev/sosys/elecpostal/internal/solar"
 )
 
 var (
@@ -82,10 +81,10 @@ type ListInput struct {
 
 // EmailService handles email-related business logic.
 type EmailService struct {
-	db    *database.DB
-	solar *solar.Client
-	files filesystem.Uploader
-	relay relay.Adapter
+	db       *database.DB
+	notifier NotificationSender
+	files    filesystem.Uploader
+	relay    relay.Adapter
 }
 
 // SetRelay configures outbound delivery. A nil adapter retains the existing
@@ -95,8 +94,15 @@ func (s *EmailService) SetRelay(adapter relay.Adapter) {
 }
 
 // NewEmailService creates a new EmailService.
-func NewEmailService(db *database.DB, solarClient *solar.Client) *EmailService {
-	return &EmailService{db: db, solar: solarClient}
+func NewEmailService(db *database.DB, notifier NotificationSender) *EmailService {
+	return &EmailService{db: db, notifier: notifier}
+}
+
+// NotificationSender is the gRPC notification capability required by the
+// email domain without coupling it to a particular service implementation.
+type NotificationSender interface {
+	SendEmailNotification(context.Context, string, string) error
+	Close() error
 }
 
 // SetAttachmentUploader enables streaming attachment uploads to FileSystem.
@@ -114,7 +120,14 @@ func (s *EmailService) Close() error {
 		}
 	}
 	if s.files != nil {
-		return s.files.Close()
+		if err := s.files.Close(); err != nil {
+			return err
+		}
+	}
+	if s.notifier != nil {
+		if err := s.notifier.Close(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -271,13 +284,6 @@ func (s *EmailService) SendEmail(ctx context.Context, accountID uuid.UUID, input
 		return nil, err
 	}
 
-	// Notify the account via Solar Network when an email is sent.
-	if s.solar != nil && s.solar.Enabled() && !input.IsDraft {
-		if _, err := s.solar.SendDirectMessage(ctx, accountID.String(), fmt.Sprintf("New email: %s", input.Subject)); err != nil {
-			logging.Log.Warn().Err(err).Str("account_id", accountID.String()).Msg("failed to send solar notification")
-		}
-	}
-
 	return &email, nil
 }
 
@@ -364,6 +370,11 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 	})
 	if err != nil {
 		return nil, err
+	}
+	if s.notifier != nil {
+		if err := s.notifier.SendEmailNotification(ctx, mailbox.AccountID.String(), input.Subject); err != nil {
+			logging.Log.Warn().Err(err).Str("account_id", mailbox.AccountID.String()).Msg("failed to send incoming email notification")
+		}
 	}
 	return &email, nil
 }

@@ -59,10 +59,10 @@ tlsMode = "starttls"
 certFile = ""
 keyFile = ""
 
-[solarNetwork]
-baseUrl = ""             # Solar Network API base URL (e.g. https://api.dyson.example)
-accessToken = ""         # Bearer token for Solar Network API calls
-accountName = ""         # Bot account name for websocket identification
+[ring]
+target = ""              # Ring gRPC target (host:port); leave empty to disable notifications
+useTLS = false
+tlsSkipVerify = false
 
 [sentry]
 dsn = ""
