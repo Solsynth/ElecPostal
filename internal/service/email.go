@@ -15,11 +15,19 @@ import (
 	"src.solsynth.dev/sosys/elecpostal/internal/filesystem"
 	"src.solsynth.dev/sosys/elecpostal/internal/logging"
 	"src.solsynth.dev/sosys/elecpostal/internal/relay"
+	"src.solsynth.dev/sosys/elecpostal/internal/workspace"
 )
 
 var (
-	ErrNotFound  = errors.New("not found")
-	ErrForbidden = errors.New("forbidden")
+	ErrNotFound             = errors.New("not found")
+	ErrForbidden            = errors.New("forbidden")
+	ErrWorkspaceUnavailable = errors.New("workspace quota service is not configured")
+	ErrMailboxLimitExceeded = errors.New("workspace mailbox limit exceeded")
+)
+
+const (
+	mailStorageFractionDivisor int64 = 10
+	archiveRetention                 = 30 * 24 * time.Hour
 )
 
 // RecipientInput is a recipient for a new email.
@@ -75,17 +83,42 @@ type ReceiveEmailInput struct {
 
 // ListInput is pagination for list endpoints.
 type ListInput struct {
-	Offset int
-	Take   int
+	Offset         int
+	Take           int
+	Query          string
+	IsRead         *bool
+	IsStarred      *bool
+	IsDraft        *bool
+	DeliveryStatus string
+	LabelID        string
+}
+
+// MailboxStats provides lightweight counts for mailbox navigation and filter badges.
+type MailboxStats struct {
+	Total          int64            `json:"total"`
+	Unread         int64            `json:"unread"`
+	Starred        int64            `json:"starred"`
+	Drafts         int64            `json:"drafts"`
+	DeliveryStatus map[string]int64 `json:"delivery_status"`
+}
+
+// MailboxQuota reports the active raw-email storage reserved from a workspace
+// plan. Attachments are excluded because DysonFS already charges them.
+type MailboxQuota struct {
+	WorkspaceID    string `json:"workspace_id"`
+	UsedBytes      int64  `json:"used_bytes"`
+	LimitBytes     int64  `json:"limit_bytes"`
+	RemainingBytes int64  `json:"remaining_bytes"`
 }
 
 // EmailService handles email-related business logic.
 type EmailService struct {
-	db       *database.DB
-	notifier NotificationSender
-	files    filesystem.Uploader
-	relay    relay.Adapter
-	domain   string
+	db        *database.DB
+	notifier  NotificationSender
+	files     filesystem.Uploader
+	relay     relay.Adapter
+	workspace workspace.Provider
+	domain    string
 }
 
 // SetRelay configures outbound delivery. A nil adapter retains the existing
@@ -134,6 +167,12 @@ func (s *EmailService) SetAttachmentUploader(uploader filesystem.Uploader) {
 	s.files = uploader
 }
 
+// SetWorkspaceProvider enables workspace membership checks and derives the
+// mail allowance from the workspace plan's storage quota.
+func (s *EmailService) SetWorkspaceProvider(provider workspace.Provider) {
+	s.workspace = provider
+}
+
 // Close releases resources held by optional downstream clients.
 func (s *EmailService) Close() error {
 	if s.relay != nil {
@@ -148,6 +187,11 @@ func (s *EmailService) Close() error {
 	}
 	if s.notifier != nil {
 		if err := s.notifier.Close(); err != nil {
+			return err
+		}
+	}
+	if s.workspace != nil {
+		if err := s.workspace.Close(); err != nil {
 			return err
 		}
 	}
@@ -166,6 +210,9 @@ func (s *EmailService) ListMailboxes(ctx context.Context, accountID uuid.UUID, w
 	var items []database.Mailbox
 	query := s.db.WithContext(ctx).Order("created_at desc")
 	if strings.TrimSpace(workspaceID) != "" {
+		if err := s.authorizeWorkspaceMember(ctx, workspaceID, accountID); err != nil {
+			return nil, err
+		}
 		query = query.Where("workspace_id = ?", workspaceID)
 	} else {
 		query = query.Where("account_id = ?", accountID)
@@ -185,6 +232,16 @@ func (s *EmailService) CreateMailbox(ctx context.Context, accountID uuid.UUID, w
 	if strings.TrimSpace(workspaceID) == "" {
 		return nil, fmt.Errorf("workspace_id is required")
 	}
+	if err := s.authorizeWorkspaceMember(ctx, workspaceID, accountID); err != nil {
+		return nil, err
+	}
+	if s.workspace == nil {
+		return nil, ErrWorkspaceUnavailable
+	}
+	mailboxLimit, err := s.workspace.MailboxLimit(ctx, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("get workspace mailbox limit: %w", err)
+	}
 
 	mailbox := database.Mailbox{
 		AccountID:   accountID,
@@ -193,7 +250,17 @@ func (s *EmailService) CreateMailbox(ctx context.Context, accountID uuid.UUID, w
 		Name:        strings.TrimSpace(name),
 		IsDefault:   isDefault,
 	}
-	if err := s.db.WithContext(ctx).Create(&mailbox).Error; err != nil {
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var count int64
+		if err := tx.Model(&database.Mailbox{}).Where("workspace_id = ?", workspaceID).Count(&count).Error; err != nil {
+			return err
+		}
+		if count >= mailboxLimit {
+			return fmt.Errorf("%w: limit=%d", ErrMailboxLimitExceeded, mailboxLimit)
+		}
+		return tx.Create(&mailbox).Error
+	})
+	if err != nil {
 		return nil, err
 	}
 	return &mailbox, nil
@@ -211,7 +278,7 @@ func (s *EmailService) ListEmails(ctx context.Context, accountID uuid.UUID, mail
 		input.Offset = 0
 	}
 
-	query := s.db.WithContext(ctx).Model(&database.Email{}).Where("account_id = ?", accountID)
+	query := s.emailListQuery(ctx, accountID, input)
 	if strings.TrimSpace(mailboxID) != "" {
 		query = query.Where("mailbox_id = ?", mailboxID)
 	}
@@ -223,23 +290,167 @@ func (s *EmailService) ListEmails(ctx context.Context, accountID uuid.UUID, mail
 
 	var items []database.Email
 	if err := query.Order("created_at desc").Offset(input.Offset).Limit(input.Take).
-		Preload("Recipients").Preload("Attachments").Preload("Mailbox").Find(&items).Error; err != nil {
+		Preload("Recipients").Preload("Attachments").Preload("Mailbox").Preload("Labels").Find(&items).Error; err != nil {
 		return nil, 0, err
 	}
 	return items, total, nil
+}
+
+// GetMailboxStats returns counts for an account's active messages. mailboxID
+// may be empty to aggregate all mailboxes.
+func (s *EmailService) GetMailboxStats(ctx context.Context, accountID uuid.UUID, mailboxID string) (MailboxStats, error) {
+	base := s.db.WithContext(ctx).Model(&database.Email{}).Where("account_id = ? AND archived_at IS NULL", accountID)
+	if strings.TrimSpace(mailboxID) != "" {
+		base = base.Where("mailbox_id = ?", mailboxID)
+	}
+	stats := MailboxStats{DeliveryStatus: make(map[string]int64)}
+	if err := base.Count(&stats.Total).Error; err != nil {
+		return stats, err
+	}
+	if err := base.Where("is_read = ?", false).Count(&stats.Unread).Error; err != nil {
+		return stats, err
+	}
+	if err := base.Where("is_starred = ?", true).Count(&stats.Starred).Error; err != nil {
+		return stats, err
+	}
+	if err := base.Where("is_draft = ?", true).Count(&stats.Drafts).Error; err != nil {
+		return stats, err
+	}
+	var statuses []struct {
+		Status string
+		Count  int64
+	}
+	if err := base.Select("delivery_status AS status, COUNT(*) AS count").Group("delivery_status").Scan(&statuses).Error; err != nil {
+		return stats, err
+	}
+	for _, status := range statuses {
+		stats.DeliveryStatus[status.Status] = status.Count
+	}
+	return stats, nil
+}
+
+func (s *EmailService) emailListQuery(ctx context.Context, accountID uuid.UUID, input ListInput) *gorm.DB {
+	query := s.db.WithContext(ctx).Model(&database.Email{}).Where("emails.account_id = ? AND emails.archived_at IS NULL", accountID)
+	if term := strings.TrimSpace(input.Query); term != "" {
+		like := "%" + strings.ToLower(term) + "%"
+		query = query.Where("(LOWER(emails.subject) LIKE ? OR LOWER(emails.body) LIKE ? OR LOWER(emails.from_address) LIKE ? OR LOWER(emails.from_name) LIKE ? OR EXISTS (SELECT 1 FROM recipients WHERE recipients.email_id = emails.id AND (LOWER(recipients.address) LIKE ? OR LOWER(recipients.name) LIKE ?)))", like, like, like, like, like, like)
+	}
+	if input.IsRead != nil {
+		query = query.Where("emails.is_read = ?", *input.IsRead)
+	}
+	if input.IsStarred != nil {
+		query = query.Where("emails.is_starred = ?", *input.IsStarred)
+	}
+	if input.IsDraft != nil {
+		query = query.Where("emails.is_draft = ?", *input.IsDraft)
+	}
+	if status := strings.TrimSpace(input.DeliveryStatus); status != "" {
+		query = query.Where("emails.delivery_status = ?", status)
+	}
+	if labelID := strings.TrimSpace(input.LabelID); labelID != "" {
+		query = query.Where("EXISTS (SELECT 1 FROM email_label_mappings WHERE email_label_mappings.email_id = emails.id AND email_label_mappings.label_id = ?)", labelID)
+	}
+	return query
+}
+
+// ListLabels returns the account's tags in a stable name order.
+func (s *EmailService) ListLabels(ctx context.Context, accountID uuid.UUID) ([]database.EmailLabel, error) {
+	var labels []database.EmailLabel
+	err := s.db.WithContext(ctx).Where("account_id = ?", accountID).Order("name ASC").Find(&labels).Error
+	return labels, err
+}
+
+// CreateLabel creates an account-owned tag.
+func (s *EmailService) CreateLabel(ctx context.Context, accountID uuid.UUID, name, color string) (*database.EmailLabel, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, fmt.Errorf("label name is required")
+	}
+	if len(name) > 128 {
+		return nil, fmt.Errorf("label name must be at most 128 characters")
+	}
+	label := database.EmailLabel{AccountID: accountID, Name: name, Color: strings.TrimSpace(color)}
+	if err := s.db.WithContext(ctx).Create(&label).Error; err != nil {
+		return nil, err
+	}
+	return &label, nil
+}
+
+// DeleteLabel removes an account-owned tag and all of its mappings.
+func (s *EmailService) DeleteLabel(ctx context.Context, accountID uuid.UUID, labelID string) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var label database.EmailLabel
+		if err := tx.Where("id = ? AND account_id = ?", labelID, accountID).First(&label).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
+			return err
+		}
+		if err := tx.Where("label_id = ?", label.ID).Delete(&database.EmailLabelMapping{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&label).Error
+	})
+}
+
+// SetEmailLabel adds or removes a tag from an account-owned email.
+func (s *EmailService) SetEmailLabel(ctx context.Context, accountID uuid.UUID, emailID, labelID string, assigned bool) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var count int64
+		if err := tx.Model(&database.Email{}).Where("id = ? AND account_id = ?", emailID, accountID).Count(&count).Error; err != nil {
+			return err
+		}
+		if count == 0 {
+			return ErrNotFound
+		}
+		if err := tx.Model(&database.EmailLabel{}).Where("id = ? AND account_id = ?", labelID, accountID).Count(&count).Error; err != nil {
+			return err
+		}
+		if count == 0 {
+			return ErrNotFound
+		}
+		if assigned {
+			return tx.Where("email_id = ? AND label_id = ?", emailID, labelID).FirstOrCreate(&database.EmailLabelMapping{EmailID: emailID, LabelID: labelID}).Error
+		}
+		return tx.Where("email_id = ? AND label_id = ?", emailID, labelID).Delete(&database.EmailLabelMapping{}).Error
+	})
 }
 
 // GetEmail returns a single email belonging to the account.
 func (s *EmailService) GetEmail(ctx context.Context, accountID uuid.UUID, id string) (*database.Email, error) {
 	var email database.Email
 	if err := s.db.WithContext(ctx).Where("id = ? AND account_id = ?", id, accountID).
-		Preload("Recipients").Preload("Attachments").Preload("Mailbox").First(&email).Error; err != nil {
+		Preload("Recipients").Preload("Attachments").Preload("Mailbox").Preload("Labels").First(&email).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrNotFound
 		}
 		return nil, err
 	}
 	return &email, nil
+}
+
+// GetMailboxQuota returns the 10% raw-email allocation and its current use
+// for the mailbox's workspace.
+func (s *EmailService) GetMailboxQuota(ctx context.Context, accountID uuid.UUID, mailboxID string) (MailboxQuota, error) {
+	var mailbox database.Mailbox
+	if err := s.db.WithContext(ctx).Where("id = ? AND account_id = ?", mailboxID, accountID).First(&mailbox).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return MailboxQuota{}, ErrNotFound
+		}
+		return MailboxQuota{}, err
+	}
+	if err := s.authorizeWorkspaceMember(ctx, mailbox.WorkspaceID, accountID); err != nil {
+		return MailboxQuota{}, err
+	}
+	limit, used, err := s.workspaceMailboxUsage(ctx, mailbox.WorkspaceID)
+	if err != nil {
+		return MailboxQuota{}, err
+	}
+	remaining := limit - used
+	if remaining < 0 {
+		remaining = 0
+	}
+	return MailboxQuota{WorkspaceID: mailbox.WorkspaceID, UsedBytes: used, LimitBytes: limit, RemainingBytes: remaining}, nil
 }
 
 // SendEmail creates and sends an email.
@@ -250,6 +461,13 @@ func (s *EmailService) SendEmail(ctx context.Context, accountID uuid.UUID, input
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrNotFound
 		}
+		return nil, err
+	}
+	if err := s.authorizeWorkspaceMember(ctx, mailbox.WorkspaceID, accountID); err != nil {
+		return nil, err
+	}
+	mailboxLimit, err := s.workspaceMailboxLimit(ctx, mailbox.WorkspaceID)
+	if err != nil {
 		return nil, err
 	}
 
@@ -264,6 +482,7 @@ func (s *EmailService) SendEmail(ctx context.Context, accountID uuid.UUID, input
 		IsDraft:        input.IsDraft,
 		DeliveryStatus: "draft",
 	}
+	email.RawSizeBytes = outgoingRawSize(email, input)
 	if !input.IsDraft {
 		email.DeliveryStatus = "pending"
 		now := time.Now()
@@ -271,7 +490,7 @@ func (s *EmailService) SendEmail(ctx context.Context, accountID uuid.UUID, input
 		email.DeliveryAttempts = 1
 	}
 
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&email).Error; err != nil {
 			return err
 		}
@@ -302,6 +521,9 @@ func (s *EmailService) SendEmail(ctx context.Context, accountID uuid.UUID, input
 		return nil
 	})
 	if err != nil {
+		return nil, err
+	}
+	if err := s.enforceWorkspaceMailboxQuota(ctx, mailbox.WorkspaceID, mailboxLimit); err != nil {
 		return nil, err
 	}
 	if input.IsDraft {
@@ -510,6 +732,10 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 		}
 		return nil, err
 	}
+	mailboxLimit, err := s.workspaceMailboxLimit(ctx, mailbox.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
 
 	attachments := make([]AttachmentInput, 0, len(input.Attachments))
 	for _, attachment := range input.Attachments {
@@ -529,7 +755,11 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 		FromName:    input.FromName,
 		SentAt:      input.SentAt,
 	}
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	email.RawSizeBytes = incomingRawSize(email, input)
+	if len(input.To) == 0 {
+		email.RawSizeBytes += rawStringSize(mailbox.Address, mailbox.Name, "to")
+	}
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&email).Error; err != nil {
 			return err
 		}
@@ -555,6 +785,9 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 		return nil
 	})
 	if err != nil {
+		return nil, err
+	}
+	if err := s.enforceWorkspaceMailboxQuota(ctx, mailbox.WorkspaceID, mailboxLimit); err != nil {
 		return nil, err
 	}
 	if s.notifier != nil {
@@ -595,9 +828,152 @@ func (s *EmailService) DeleteEmail(ctx context.Context, accountID uuid.UUID, id 
 	return nil
 }
 
+// PurgeArchivedEmails permanently removes raw email records whose 30-day
+// archive retention window has elapsed. Attachment contents remain managed by
+// DysonFS and are intentionally not included in mailbox storage accounting.
+func (s *EmailService) PurgeArchivedEmails(ctx context.Context) (int64, error) {
+	var emails []database.Email
+	if err := s.db.WithContext(ctx).Where("archive_delete_at IS NOT NULL AND archive_delete_at <= ?", time.Now()).Find(&emails).Error; err != nil {
+		return 0, err
+	}
+	var purged int64
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for _, email := range emails {
+			if err := tx.Where("email_id = ?", email.ID).Delete(&database.Recipient{}).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("email_id = ?", email.ID).Delete(&database.Attachment{}).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("email_id = ?", email.ID).Delete(&database.EmailLabelMapping{}).Error; err != nil {
+				return err
+			}
+			result := tx.Unscoped().Delete(&database.Email{}, "id = ?", email.ID)
+			if result.Error != nil {
+				return result.Error
+			}
+			purged += result.RowsAffected
+		}
+		return nil
+	})
+	return purged, err
+}
+
+func (s *EmailService) authorizeWorkspaceMember(ctx context.Context, workspaceID string, accountID uuid.UUID) error {
+	if s.workspace == nil {
+		return ErrWorkspaceUnavailable
+	}
+	if err := s.workspace.AuthorizeMember(ctx, workspaceID, accountID.String()); err != nil {
+		return fmt.Errorf("authorize workspace mailbox: %w", err)
+	}
+	return nil
+}
+
+// enforceWorkspaceMailboxQuota retains the newest messages in a workspace.
+// Archived messages are excluded from the active mailbox budget and receive a
+// fixed 30-day deletion deadline.
+func (s *EmailService) enforceWorkspaceMailboxQuota(ctx context.Context, workspaceID string, limit int64) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var used int64
+		if err := tx.Model(&database.Email{}).
+			Select("COALESCE(SUM(emails.raw_size_bytes), 0)").
+			Joins("JOIN mailboxes ON mailboxes.id = emails.mailbox_id AND mailboxes.deleted_at IS NULL").
+			Where("mailboxes.workspace_id = ? AND emails.archived_at IS NULL", workspaceID).
+			Scan(&used).Error; err != nil {
+			return fmt.Errorf("calculate workspace mail usage: %w", err)
+		}
+		deadline := time.Now().Add(archiveRetention)
+		for used > limit {
+			var oldest database.Email
+			if err := tx.Joins("JOIN mailboxes ON mailboxes.id = emails.mailbox_id AND mailboxes.deleted_at IS NULL").
+				Where("mailboxes.workspace_id = ? AND emails.archived_at IS NULL", workspaceID).
+				Order("emails.created_at ASC, emails.id ASC").First(&oldest).Error; err != nil {
+				return fmt.Errorf("find email to archive: %w", err)
+			}
+			now := time.Now()
+			if err := tx.Model(&oldest).Updates(map[string]any{"archived_at": now, "archive_delete_at": deadline}).Error; err != nil {
+				return fmt.Errorf("archive email: %w", err)
+			}
+			used -= oldest.RawSizeBytes
+		}
+		return nil
+	})
+}
+
+func (s *EmailService) workspaceMailboxUsage(ctx context.Context, workspaceID string) (limit, used int64, err error) {
+	limit, err = s.workspaceMailboxLimit(ctx, workspaceID)
+	if err != nil {
+		return 0, 0, err
+	}
+	err = s.db.WithContext(ctx).Model(&database.Email{}).
+		Select("COALESCE(SUM(emails.raw_size_bytes), 0)").
+		Joins("JOIN mailboxes ON mailboxes.id = emails.mailbox_id AND mailboxes.deleted_at IS NULL").
+		Where("mailboxes.workspace_id = ? AND emails.archived_at IS NULL", workspaceID).
+		Scan(&used).Error
+	if err != nil {
+		return 0, 0, fmt.Errorf("calculate workspace mail usage: %w", err)
+	}
+	return limit, used, nil
+}
+
+func (s *EmailService) workspaceMailboxLimit(ctx context.Context, workspaceID string) (int64, error) {
+	if s.workspace == nil {
+		return 0, ErrWorkspaceUnavailable
+	}
+	totalBytes, err := s.workspace.PlanStorageBytes(ctx, workspaceID)
+	if err != nil {
+		return 0, fmt.Errorf("get workspace mail quota: %w", err)
+	}
+	limit := totalBytes / mailStorageFractionDivisor
+	if limit <= 0 {
+		return 0, fmt.Errorf("workspace mail quota is zero")
+	}
+	return limit, nil
+}
+
+func outgoingRawSize(email database.Email, input SendEmailInput) int64 {
+	size := rawStringSize(email.Subject, email.Body, email.FromAddress, email.FromName)
+	for _, recipients := range [][]RecipientInput{input.To, input.Cc, input.Bcc} {
+		for _, recipient := range recipients {
+			size += rawStringSize(recipient.Address, recipient.Name, normalizeKind(recipient.Kind, "to"))
+		}
+	}
+	return size
+}
+
+func incomingRawSize(email database.Email, input ReceiveEmailInput) int64 {
+	size := rawStringSize(email.Subject, email.Body, email.FromAddress, email.FromName)
+	for _, recipients := range [][]RecipientInput{input.To, input.Cc} {
+		for _, recipient := range recipients {
+			size += rawStringSize(recipient.Address, recipient.Name, normalizeKind(recipient.Kind, "to"))
+		}
+	}
+	return size
+}
+
+func rawStringSize(values ...string) int64 {
+	var size int64
+	for _, value := range values {
+		size += int64(len(value))
+	}
+	return size
+}
+
 // MarkRead toggles the read flag of an email.
 func (s *EmailService) MarkRead(ctx context.Context, accountID uuid.UUID, id string, isRead bool) error {
 	result := s.db.WithContext(ctx).Model(&database.Email{}).Where("id = ? AND account_id = ?", id, accountID).Update("is_read", isRead)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// MarkStarred toggles the flag of an email.
+func (s *EmailService) MarkStarred(ctx context.Context, accountID uuid.UUID, id string, isStarred bool) error {
+	result := s.db.WithContext(ctx).Model(&database.Email{}).Where("id = ? AND account_id = ?", id, accountID).Update("is_starred", isStarred)
 	if result.Error != nil {
 		return result.Error
 	}

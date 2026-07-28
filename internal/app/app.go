@@ -21,6 +21,7 @@ import (
 	"src.solsynth.dev/sosys/elecpostal/internal/ring"
 	"src.solsynth.dev/sosys/elecpostal/internal/server"
 	"src.solsynth.dev/sosys/elecpostal/internal/service"
+	"src.solsynth.dev/sosys/elecpostal/internal/workspace"
 )
 
 // App is the application runtime.
@@ -87,6 +88,14 @@ func New(cfg *config.Config) (*App, error) {
 		emailSvc.SetAttachmentUploader(fileClient)
 		logging.Log.Info().Str("target", cfg.FileSystem.Target).Msg("filesystem attachment uploader configured")
 	}
+	if cfg.Workspace.Target != "" {
+		workspaceClient, err := workspace.NewClient(cfg.Workspace.Target, cfg.Workspace.UseTLS, cfg.Workspace.TLSSkipVerify)
+		if err != nil {
+			return nil, err
+		}
+		emailSvc.SetWorkspaceProvider(workspaceClient)
+		logging.Log.Info().Str("target", cfg.Workspace.Target).Msg("workspace quota provider configured")
+	}
 	router := server.NewRouter(cfg, emailSvc)
 
 	httpSrv := &http.Server{
@@ -138,6 +147,7 @@ func (a *App) Start(ctx context.Context) error {
 			logging.Log.Error().Err(err).Msg("grpc server stopped")
 		}
 	}()
+	go a.purgeArchivedEmails(ctx)
 	go func() {
 		if err := a.httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logging.Log.Error().Err(err).Msg("http server stopped")
@@ -149,6 +159,30 @@ func (a *App) Start(ctx context.Context) error {
 		Str("grpc", a.cfg.GRPC.Port).
 		Msg("elecpostal started")
 	return nil
+}
+
+func (a *App) purgeArchivedEmails(ctx context.Context) {
+	purge := func() {
+		count, err := a.emailSvc.PurgeArchivedEmails(ctx)
+		if err != nil {
+			logging.Log.Error().Err(err).Msg("purge archived emails")
+			return
+		}
+		if count > 0 {
+			logging.Log.Info().Int64("count", count).Msg("purged archived emails")
+		}
+	}
+	purge()
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			purge()
+		}
+	}
 }
 
 // Stop gracefully shuts down the application.

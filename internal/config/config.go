@@ -16,6 +16,7 @@ type Config struct {
 	Redis      RedisConfig      `mapstructure:"redis"`
 	Auth       AuthConfig       `mapstructure:"auth"`
 	FileSystem FileSystemConfig `mapstructure:"filesystem"`
+	Workspace  WorkspaceConfig  `mapstructure:"workspace"`
 	Mail       MailConfig       `mapstructure:"mail"`
 	Ring       RingConfig       `mapstructure:"ring"`
 	Sentry     SentryConfig     `mapstructure:"sentry"`
@@ -54,6 +55,14 @@ type AuthConfig struct {
 // attachment contents. It is deliberately separate from the public HTTP URL:
 // attachments are uploaded server-to-server on behalf of the mailbox owner.
 type FileSystemConfig struct {
+	Target        string `mapstructure:"target"`
+	UseTLS        bool   `mapstructure:"useTLS"`
+	TLSSkipVerify bool   `mapstructure:"tlsSkipVerify"`
+}
+
+// WorkspaceConfig configures the Workspace gRPC endpoint used to associate
+// mailboxes with workspaces and to read the plan storage quota.
+type WorkspaceConfig struct {
 	Target        string `mapstructure:"target"`
 	UseTLS        bool   `mapstructure:"useTLS"`
 	TLSSkipVerify bool   `mapstructure:"tlsSkipVerify"`
@@ -124,6 +133,9 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("filesystem.target", "")
 	v.SetDefault("filesystem.useTLS", false)
 	v.SetDefault("filesystem.tlsSkipVerify", false)
+	v.SetDefault("workspace.target", "")
+	v.SetDefault("workspace.useTLS", false)
+	v.SetDefault("workspace.tlsSkipVerify", false)
 	v.SetDefault("mail.domain", "")
 	v.SetDefault("mail.relay.adapter", "")
 	v.SetDefault("mail.relay.port", "587")
@@ -163,6 +175,7 @@ func applyEnvOverrides(v *viper.Viper) {
 	setEnvIfPresent(v, "database.dsn", "DATABASE_DSN")
 	setEnvIfPresent(v, "auth.target", "AUTH_TARGET")
 	setEnvIfPresent(v, "filesystem.target", "FILESYSTEM_TARGET")
+	setEnvIfPresent(v, "workspace.target", "WORKSPACE_TARGET")
 	setEnvIfPresent(v, "mail.domain", "MAIL_DOMAIN")
 	setEnvIfPresent(v, "mail.relay.adapter", "MAIL_RELAY_ADAPTER")
 	setEnvIfPresent(v, "mail.relay.host", "MAIL_RELAY_HOST")

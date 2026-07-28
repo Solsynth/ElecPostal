@@ -29,6 +29,7 @@ Key settings:
 - `auth.target`
 - `auth.useTLS`
 - `filesystem.target` (optional FileSystem gRPC endpoint for inbound email attachments)
+- `workspace.target` (Workspace gRPC endpoint required for workspace mailbox authorization and plan-based mail quotas)
 - `ring.target` (optional Ring gRPC endpoint for account notifications)
 - `mail.domain` (canonical mail domain; local-only mailbox addresses are completed with this domain before outbound delivery and exposed via `GET /api/mail/host`)
 
@@ -39,6 +40,15 @@ file IDs as the `attachment_ids` string array to `POST /api/emails`. Inbound del
 services pass raw attachments to `EmailService.ReceiveEmail`; ElecPostal streams
 them to DysonFS under the destination mailbox's owner and workspace before it
 persists the email.
+
+## Workspace email quota
+
+Mailboxes belong to a workspace. ElecPostal reads that workspace's plan quota
+and reserves 10% for raw email records in its database (for example, a 10 GB
+plan allows 1 GB of active email). DysonFS attachment content is excluded from
+this calculation because it is already counted by DysonFS. When the allowance
+is exceeded, ElecPostal archives the oldest messages and permanently removes
+their raw records after 30 days.
 
 ## Credentials
 

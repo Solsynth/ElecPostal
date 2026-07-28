@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -19,17 +20,31 @@ func RegisterRoutes(r *gin.RouterGroup, emailSvc *service.EmailService) {
 		mailboxes.GET("", func(c *gin.Context) { listMailboxes(c, emailSvc) })
 		mailboxes.POST("", func(c *gin.Context) { createMailbox(c, emailSvc) })
 		mailboxes.GET("/:id/emails", func(c *gin.Context) { listMailboxEmails(c, emailSvc) })
+		mailboxes.GET("/:id/stats", func(c *gin.Context) { getMailboxStats(c, emailSvc) })
+		mailboxes.GET("/:id/quota", func(c *gin.Context) { getMailboxQuota(c, emailSvc) })
 	}
 
 	emails := r.Group("/emails")
 	{
 		emails.GET("", func(c *gin.Context) { listEmails(c, emailSvc) })
+		emails.GET("/stats", func(c *gin.Context) { getMailboxStats(c, emailSvc) })
 		emails.POST("", func(c *gin.Context) { sendEmail(c, emailSvc) })
 		emails.GET("/:id", func(c *gin.Context) { getEmail(c, emailSvc) })
 		emails.POST("/:id/resend", func(c *gin.Context) { resendEmail(c, emailSvc) })
 		emails.DELETE("/:id", func(c *gin.Context) { deleteEmail(c, emailSvc) })
 		emails.POST("/:id/read", func(c *gin.Context) { markRead(c, emailSvc, true) })
 		emails.POST("/:id/unread", func(c *gin.Context) { markRead(c, emailSvc, false) })
+		emails.POST("/:id/star", func(c *gin.Context) { markStarred(c, emailSvc, true) })
+		emails.POST("/:id/unstar", func(c *gin.Context) { markStarred(c, emailSvc, false) })
+		emails.POST("/:id/labels/:labelID", func(c *gin.Context) { setEmailLabel(c, emailSvc, true) })
+		emails.DELETE("/:id/labels/:labelID", func(c *gin.Context) { setEmailLabel(c, emailSvc, false) })
+	}
+
+	labels := r.Group("/labels")
+	{
+		labels.GET("", func(c *gin.Context) { listLabels(c, emailSvc) })
+		labels.POST("", func(c *gin.Context) { createLabel(c, emailSvc) })
+		labels.DELETE("/:id", func(c *gin.Context) { deleteLabel(c, emailSvc) })
 	}
 
 	credentials := r.Group("/credentials")
@@ -38,6 +53,19 @@ func RegisterRoutes(r *gin.RouterGroup, emailSvc *service.EmailService) {
 		credentials.POST("", func(c *gin.Context) { createMailCredential(c, emailSvc) })
 		credentials.DELETE("/:id", func(c *gin.Context) { deleteMailCredential(c, emailSvc) })
 	}
+}
+
+func getMailboxQuota(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	quota, err := emailSvc.GetMailboxQuota(c.Request.Context(), uuid.MustParse(accountID), c.Param("id"))
+	if err != nil {
+		renderServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, quota)
 }
 
 func listMailboxes(c *gin.Context, emailSvc *service.EmailService) {
@@ -110,6 +138,19 @@ func listEmails(c *gin.Context, emailSvc *service.EmailService) {
 	}
 	c.Header("X-Total", strconv.FormatInt(total, 10))
 	c.JSON(http.StatusOK, items)
+}
+
+func getMailboxStats(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	stats, err := emailSvc.GetMailboxStats(c.Request.Context(), uuid.MustParse(accountID), c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, stats)
 }
 
 func sendEmail(c *gin.Context, emailSvc *service.EmailService) {
@@ -185,6 +226,76 @@ func markRead(c *gin.Context, emailSvc *service.EmailService, isRead bool) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
+func markStarred(c *gin.Context, emailSvc *service.EmailService, isStarred bool) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	if err := emailSvc.MarkStarred(c.Request.Context(), uuid.MustParse(accountID), c.Param("id"), isStarred); err != nil {
+		renderServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func listLabels(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	items, err := emailSvc.ListLabels(c.Request.Context(), uuid.MustParse(accountID))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, items)
+}
+
+func createLabel(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	var input struct {
+		Name  string `json:"name" binding:"required"`
+		Color string `json:"color"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	label, err := emailSvc.CreateLabel(c.Request.Context(), uuid.MustParse(accountID), input.Name, input.Color)
+	if err != nil {
+		renderServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, label)
+}
+
+func deleteLabel(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	if err := emailSvc.DeleteLabel(c.Request.Context(), uuid.MustParse(accountID), c.Param("id")); err != nil {
+		renderServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func setEmailLabel(c *gin.Context, emailSvc *service.EmailService, assigned bool) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	if err := emailSvc.SetEmailLabel(c.Request.Context(), uuid.MustParse(accountID), c.Param("id"), c.Param("labelID"), assigned); err != nil {
+		renderServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
 func listMailCredentials(c *gin.Context, emailSvc *service.EmailService) {
 	accountID, ok := identity.RequireAccountID(c)
 	if !ok {
@@ -237,7 +348,15 @@ func parseListInput(c *gin.Context) service.ListInput {
 	if parsed, err := strconv.Atoi(c.DefaultQuery("offset", "0")); err == nil && parsed >= 0 {
 		offset = parsed
 	}
-	return service.ListInput{Take: take, Offset: offset}
+	input := service.ListInput{Take: take, Offset: offset, Query: c.Query("q"), DeliveryStatus: strings.TrimSpace(c.Query("delivery_status")), LabelID: strings.TrimSpace(c.Query("label_id"))}
+	for key, target := range map[string]**bool{"is_read": &input.IsRead, "is_starred": &input.IsStarred, "is_draft": &input.IsDraft} {
+		if raw, exists := c.GetQuery(key); exists {
+			if value, err := strconv.ParseBool(raw); err == nil {
+				*target = &value
+			}
+		}
+	}
+	return input
 }
 
 func renderServiceError(c *gin.Context, err error) {

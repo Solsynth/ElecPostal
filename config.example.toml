@@ -25,6 +25,11 @@ target = ""              # FileSystem gRPC target (host:port); leave empty to di
 useTLS = false
 tlsSkipVerify = false
 
+[workspace]
+target = ""              # Workspace gRPC target; required for workspace mailbox creation and email quota enforcement
+useTLS = false
+tlsSkipVerify = false
+
 [mail.relay]
 adapter = ""                # direct-smtp sends to MX directly; ses uses the AWS SDK
 host = "mail.example.com"   # required only by direct-smtp for HELO/EHLO

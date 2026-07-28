@@ -65,6 +65,30 @@ account.
 
 Returns `201 Created` with the mailbox.
 
+Creating a mailbox requires the authenticated account to be an active member of
+the selected workspace. Workspace plans allow 1 mailbox on Free, 3 on Pro, and
+10 on Enterprise.
+
+### Mailbox email quota
+
+`GET /api/mailboxes/{mailbox-id}/quota`
+
+Returns the raw-email allocation for the mailbox's workspace. The allocation is
+10% of the workspace plan's storage quota; attachment bytes are excluded because
+DysonFS has already accounted for them.
+
+```json
+{
+  "workspace_id": "01J...",
+  "used_bytes": 268435456,
+  "limit_bytes": 1073741824,
+  "remaining_bytes": 805306368
+}
+```
+
+Once this allocation is exceeded, the oldest messages are archived and given a
+30-day deletion deadline. Archived messages are omitted from normal email lists.
+
 ## Emails
 
 ### List emails
@@ -75,6 +99,22 @@ Returns `201 Created` with the mailbox.
 
 `take` defaults to `20` and is capped at `200`. The `X-Total` response header
 contains the number of matching emails.
+
+The list endpoints support mailbox-style discovery filters. Combine them as
+needed:
+
+| Parameter | Description |
+| --- | --- |
+| `q` | Case-insensitive match against subject, body, sender, and recipients. |
+| `is_read` | `true` or `false`. |
+| `is_starred` | `true` or `false`. |
+| `is_draft` | `true` or `false`. |
+| `delivery_status` | Exact delivery state such as `sent`, `failed`, `pending`, or `draft`. |
+| `label_id` | Only messages carrying this tag. |
+
+For filter counts and navigation badges, use `GET /api/emails/stats` or
+`GET /api/mailboxes/{mailbox-id}/stats`. Both return a total, unread, starred,
+and draft count plus a count by delivery state.
 
 ### Get an email
 
@@ -148,6 +188,39 @@ silently omitted.
 `POST /api/emails/{email-id}/unread`
 
 Both return `{"ok":true}`.
+
+### Star and unstar
+
+`POST /api/emails/{email-id}/star`
+
+`POST /api/emails/{email-id}/unstar`
+
+Both return `{"ok":true}`.
+
+## Tags
+
+Tags are account-owned labels. Their data is included in each listed or fetched
+email under `labels`.
+
+### List and create tags
+
+`GET /api/labels`
+
+`POST /api/labels`
+
+```json
+{"name":"Receipts","color":"#16a34a"}
+```
+
+### Apply, remove, and delete tags
+
+`POST /api/emails/{email-id}/labels/{label-id}` applies a tag.
+
+`DELETE /api/emails/{email-id}/labels/{label-id}` removes it.
+
+`DELETE /api/labels/{label-id}` deletes the tag and its mappings.
+
+All successful tag mutation endpoints return `{"ok":true}`.
 
 ## Credentials
 

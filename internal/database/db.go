@@ -30,7 +30,7 @@ func Open(cfg *config.Config) (*DB, error) {
 }
 
 func (d *DB) AutoMigrate() error {
-	return d.DB.AutoMigrate(
+	if err := d.DB.AutoMigrate(
 		&Mailbox{},
 		&Email{},
 		&Recipient{},
@@ -38,5 +38,16 @@ func (d *DB) AutoMigrate() error {
 		&MailProtocolCredential{},
 		&EmailLabel{},
 		&EmailLabelMapping{},
-	)
+	); err != nil {
+		return err
+	}
+	// Populate the quota field for messages created before RawSizeBytes was
+	// introduced. Attachments are intentionally not included: DysonFS accounts
+	// for their bytes independently.
+	return d.Exec(`
+		UPDATE emails
+		SET raw_size_bytes = OCTET_LENGTH(subject) + OCTET_LENGTH(body) + OCTET_LENGTH(from_address) + OCTET_LENGTH(from_name) +
+			COALESCE((SELECT SUM(OCTET_LENGTH(address) + OCTET_LENGTH(name) + OCTET_LENGTH(kind)) FROM recipients WHERE recipients.email_id = emails.id), 0)
+		WHERE raw_size_bytes = 0
+	`).Error
 }
