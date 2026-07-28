@@ -54,16 +54,25 @@ func New(cfg *config.Config) (*App, error) {
 	}
 
 	emailSvc := service.NewEmailService(db, notifier)
-	if cfg.Mail.Relay.Adapter == "direct-smtp" {
+	switch cfg.Mail.Relay.Adapter {
+	case "direct-smtp":
 		directRelay, err := relay.NewDirectSMTPAdapter(relay.DirectSMTPConfig{
 			Hostname:      cfg.Mail.Relay.Host,
+			InboundHost:   cfg.Mail.Relay.InboundHost,
 			RequireTLS:    cfg.Mail.Relay.TLSMode == "required",
 			TLSSkipVerify: cfg.Mail.Relay.TLSSkipVerify,
+			LocalDelivery: emailSvc.DeliverLocal,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("configure direct SMTP relay: %w", err)
 		}
 		emailSvc.SetRelay(directRelay)
+	case "ses":
+		sesRelay, err := relay.NewSESAdapter(context.Background(), relay.SESConfig{Region: cfg.Mail.Relay.Region})
+		if err != nil {
+			return nil, fmt.Errorf("configure SES relay: %w", err)
+		}
+		emailSvc.SetRelay(relay.NewLocalMXRouter(cfg.Mail.Relay.InboundHost, emailSvc.DeliverLocal, sesRelay))
 	}
 	if cfg.FileSystem.Target != "" {
 		fileClient, err := filesystem.NewClient(cfg.FileSystem.Target, cfg.FileSystem.UseTLS, cfg.FileSystem.TLSSkipVerify)

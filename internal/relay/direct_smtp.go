@@ -15,23 +15,34 @@ import (
 // DirectSMTPConfig controls direct-to-MX delivery. STARTTLS is attempted when
 // advertised by the receiving server; RequireTLS makes that mandatory.
 type DirectSMTPConfig struct {
-	Hostname       string
-	RequireTLS     bool
-	TLSSkipVerify  bool
+	Hostname      string
+	InboundHost   string
+	RequireTLS    bool
+	TLSSkipVerify bool
+	// LocalDelivery receives messages whose destination domain publishes this
+	// server's Hostname as an MX record. It avoids an SMTP round trip back into
+	// the same service.
+	LocalDelivery  func(context.Context, Message, []string) error
 	ConnectTimeout int // Reserved for a dialer-backed adapter implementation.
 }
 
 // DirectSMTPAdapter delivers mail directly to each recipient domain's MX host.
 // It does not use a third-party relay and therefore needs outbound TCP/25.
 type DirectSMTPAdapter struct {
-	cfg DirectSMTPConfig
+	cfg      DirectSMTPConfig
+	lookupMX func(context.Context, string) ([]*net.MX, error)
+	dial     func(context.Context, string, string) (net.Conn, error)
 }
 
 func NewDirectSMTPAdapter(cfg DirectSMTPConfig) (*DirectSMTPAdapter, error) {
 	if strings.TrimSpace(cfg.Hostname) == "" {
 		return nil, fmt.Errorf("direct SMTP hostname is required")
 	}
-	return &DirectSMTPAdapter{cfg: cfg}, nil
+	return &DirectSMTPAdapter{
+		cfg:      cfg,
+		lookupMX: net.DefaultResolver.LookupMX,
+		dial:     (&net.Dialer{}).DialContext,
+	}, nil
 }
 
 func (a *DirectSMTPAdapter) Send(ctx context.Context, message Message) error {
@@ -53,23 +64,26 @@ func (a *DirectSMTPAdapter) Send(ctx context.Context, message Message) error {
 	}
 	data := formatMessage(message)
 	for domain, domainRecipients := range byDomain {
-		if err := a.deliverDomain(ctx, from.Address, domain, domainRecipients, data); err != nil {
+		if err := a.deliverDomain(ctx, from.Address, domain, domainRecipients, data, message); err != nil {
 			return fmt.Errorf("deliver to %s: %w", domain, err)
 		}
 	}
 	return nil
 }
 
-func (a *DirectSMTPAdapter) deliverDomain(ctx context.Context, from, domain string, recipients []string, data []byte) error {
-	mxRecords, err := net.DefaultResolver.LookupMX(ctx, domain)
+func (a *DirectSMTPAdapter) deliverDomain(ctx context.Context, from, domain string, recipients []string, data []byte, message Message) error {
+	mxRecords, err := a.lookupMX(ctx, domain)
 	if err != nil {
 		return err
 	}
 	sort.Slice(mxRecords, func(i, j int) bool { return mxRecords[i].Pref < mxRecords[j].Pref })
+	if a.cfg.LocalDelivery != nil && hasLocalMX(mxRecords, a.cfg.InboundHost) {
+		return a.cfg.LocalDelivery(ctx, message, recipients)
+	}
 	var lastErr error
 	for _, mx := range mxRecords {
 		host := strings.TrimSuffix(mx.Host, ".")
-		connection, err := (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort(host, "25"))
+		connection, err := a.dial(ctx, "tcp", net.JoinHostPort(host, "25"))
 		if err != nil {
 			lastErr = err
 			continue
@@ -97,6 +111,23 @@ func (a *DirectSMTPAdapter) deliverDomain(ctx context.Context, from, domain stri
 		lastErr = fmt.Errorf("no MX records for %s", domain)
 	}
 	return lastErr
+}
+
+func hasLocalMX(mxRecords []*net.MX, hostname string) bool {
+	hostname = normalizeHostname(hostname)
+	if hostname == "" {
+		return false
+	}
+	for _, mx := range mxRecords {
+		if mx != nil && normalizeHostname(mx.Host) == hostname {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeHostname(host string) string {
+	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
 }
 
 func sendSMTPTransaction(client *smtp.Client, from string, recipients []string, data []byte) error {

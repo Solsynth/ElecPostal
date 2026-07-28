@@ -53,6 +53,17 @@ hostname for EHLO. Direct delivery uses TCP port 25 and opportunistically uses
 STARTTLS; set `mail.relay.tlsMode = "required"` to reject MX servers that do
 not support STARTTLS.
 
+Set `mail.relay.adapter = "ses"` to use the AWS SDK's SES API v2 client.
+Set `mail.relay.region` and authenticate through the AWS SDK default credential
+chain (for example, an IAM role, `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, or
+an AWS shared profile). SES SMTP credentials and `mail.relay.host` are not used
+by this adapter.
+
+For either adapter, set `mail.relay.inboundHost` to this service's public MX
+hostname. If DNS resolves a recipient domain to that host, ElecPostal stores
+the message directly in its local mailbox rather than handing it to the
+external delivery path.
+
 Other delivery providers, including SES, are implemented as adapters behind the
 same outbound-delivery contract. Attachment IDs require a DysonFS byte source;
 until that is configured, enabled delivery rejects messages with attachments

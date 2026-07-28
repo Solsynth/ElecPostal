@@ -26,11 +26,13 @@ useTLS = false
 tlsSkipVerify = false
 
 [mail.relay]
-adapter = ""                # direct-smtp sends to MX directly; SES adapter will use this same boundary
-host = "mail.example.com"   # required by direct-smtp for HELO/EHLO
+adapter = ""                # direct-smtp sends to MX directly; ses uses the AWS SDK
+host = "mail.example.com"   # required only by direct-smtp for HELO/EHLO
 port = "587"
-username = ""              # SES SMTP username; use MAIL_RELAY_USERNAME in production
-password = ""              # SES SMTP password; use MAIL_RELAY_PASSWORD in production
+username = ""               # reserved for SMTP-based adapters
+password = ""               # reserved for SMTP-based adapters
+region = "ap-northeast-1"   # required by adapter = "ses"; AWS SDK credentials use its default provider chain
+inboundHost = "mail.example.com" # matching recipient MX records are delivered locally before the outbound adapter
 tlsMode = "starttls"       # direct-smtp: starttls or required; listener modes: starttls, implicit, disabled
 tlsHost = ""               # optional TLS server-name override
 tlsSkipVerify = false

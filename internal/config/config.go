@@ -70,11 +70,13 @@ type MailConfig struct {
 }
 
 type RelayConfig struct {
-	Adapter       string `mapstructure:"adapter"` // ses-smtp, or another registered adapter
+	Adapter       string `mapstructure:"adapter"` // direct-smtp, ses, or another registered adapter
 	Host          string `mapstructure:"host"`
 	Port          string `mapstructure:"port"`
 	Username      string `mapstructure:"username"`
 	Password      string `mapstructure:"password"`
+	Region        string `mapstructure:"region"`
+	InboundHost   string `mapstructure:"inboundHost"`
 	TLSMode       string `mapstructure:"tlsMode"` // starttls, implicit, disabled
 	TLSHost       string `mapstructure:"tlsHost"`
 	TLSSkipVerify bool   `mapstructure:"tlsSkipVerify"`
@@ -164,6 +166,8 @@ func applyEnvOverrides(v *viper.Viper) {
 	setEnvIfPresent(v, "mail.relay.port", "MAIL_RELAY_PORT")
 	setEnvIfPresent(v, "mail.relay.username", "MAIL_RELAY_USERNAME")
 	setEnvIfPresent(v, "mail.relay.password", "MAIL_RELAY_PASSWORD")
+	setEnvIfPresent(v, "mail.relay.region", "MAIL_RELAY_REGION")
+	setEnvIfPresent(v, "mail.relay.inboundHost", "MAIL_RELAY_INBOUND_HOST")
 	setEnvIfPresent(v, "ring.target", "RING_TARGET")
 }
 

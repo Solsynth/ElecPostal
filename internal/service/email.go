@@ -307,6 +307,53 @@ func outgoingRelayMessage(mailbox database.Mailbox, input SendEmailInput) relay.
 	return message
 }
 
+// DeliverLocal stores copies of an outbound message in the mailboxes selected
+// by the direct SMTP adapter. The adapter calls this only after DNS confirms
+// that the recipient domain's MX points at this server.
+func (s *EmailService) DeliverLocal(ctx context.Context, message relay.Message, recipients []string) error {
+	if len(message.AttachmentIDs) > 0 {
+		return relay.ErrAttachmentSourceRequired
+	}
+	now := time.Now()
+	delivered := make(map[string]struct{}, len(recipients))
+	for _, recipient := range recipients {
+		address := strings.ToLower(strings.TrimSpace(recipient))
+		if _, seen := delivered[address]; seen {
+			continue
+		}
+		delivered[address] = struct{}{}
+
+		var mailbox database.Mailbox
+		if err := s.db.WithContext(ctx).Where("LOWER(address) = ?", address).First(&mailbox).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("local recipient %q: %w", recipient, ErrNotFound)
+			}
+			return err
+		}
+		if _, err := s.ReceiveEmail(ctx, ReceiveEmailInput{
+			MailboxID:   mailbox.ID,
+			FromAddress: message.FromAddress,
+			FromName:    message.FromName,
+			Subject:     message.Subject,
+			Body:        message.Body,
+			To:          localRecipientInputs(message.To, "to"),
+			Cc:          localRecipientInputs(message.Cc, "cc"),
+			SentAt:      &now,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func localRecipientInputs(addresses []string, kind string) []RecipientInput {
+	result := make([]RecipientInput, 0, len(addresses))
+	for _, address := range addresses {
+		result = append(result, RecipientInput{Address: address, Kind: kind})
+	}
+	return result
+}
+
 // ReceiveEmail stores a message received from another mail service. Raw
 // attachments are uploaded under the destination mailbox owner and workspace,
 // whereas outgoing messages retain the client-provided DysonFS IDs.
