@@ -85,6 +85,7 @@ type EmailService struct {
 	notifier NotificationSender
 	files    filesystem.Uploader
 	relay    relay.Adapter
+	domain   string
 }
 
 // SetRelay configures outbound delivery. A nil adapter retains the existing
@@ -93,9 +94,30 @@ func (s *EmailService) SetRelay(adapter relay.Adapter) {
 	s.relay = adapter
 }
 
+// SetDomain configures the canonical mail domain used to complete local-only
+// mailbox addresses (e.g. "alice" -> "alice@example.com") for outbound relay.
+func (s *EmailService) SetDomain(domain string) {
+	s.domain = strings.TrimSpace(strings.ToLower(domain))
+}
+
 // NewEmailService creates a new EmailService.
 func NewEmailService(db *database.DB, notifier NotificationSender) *EmailService {
 	return &EmailService{db: db, notifier: notifier}
+}
+
+// MailHost returns the configured canonical mail domain, if any.
+func (s *EmailService) MailHost() string {
+	return s.domain
+}
+
+// normalizeFromAddress returns a full email address for the mailbox. When the
+// configured domain is present and the stored address lacks one, it appends it.
+func (s *EmailService) normalizeFromAddress(address string) string {
+	address = strings.TrimSpace(strings.ToLower(address))
+	if address == "" || s.domain == "" || strings.Contains(address, "@") {
+		return address
+	}
+	return address + "@" + s.domain
 }
 
 // NotificationSender is the gRPC notification capability required by the
@@ -231,18 +253,19 @@ func (s *EmailService) SendEmail(ctx context.Context, accountID uuid.UUID, input
 		return nil, err
 	}
 
+	fromAddress := s.normalizeFromAddress(mailbox.Address)
 	email := database.Email{
 		AccountID:   accountID,
 		MailboxID:   input.MailboxID,
 		Subject:     input.Subject,
 		Body:        input.Body,
-		FromAddress: mailbox.Address,
+		FromAddress: fromAddress,
 		FromName:    mailbox.Name,
 		IsDraft:     input.IsDraft,
 	}
 	if !input.IsDraft {
 		if s.relay != nil {
-			if err := s.relay.Send(ctx, outgoingRelayMessage(mailbox, input)); err != nil {
+			if err := s.relay.Send(ctx, outgoingRelayMessage(mailbox, fromAddress, input)); err != nil {
 				return nil, fmt.Errorf("deliver email: %w", err)
 			}
 		}
@@ -287,9 +310,9 @@ func (s *EmailService) SendEmail(ctx context.Context, accountID uuid.UUID, input
 	return &email, nil
 }
 
-func outgoingRelayMessage(mailbox database.Mailbox, input SendEmailInput) relay.Message {
+func outgoingRelayMessage(mailbox database.Mailbox, fromAddress string, input SendEmailInput) relay.Message {
 	message := relay.Message{
-		FromAddress:   mailbox.Address,
+		FromAddress:   fromAddress,
 		FromName:      mailbox.Name,
 		Subject:       input.Subject,
 		Body:          input.Body,

@@ -63,10 +63,11 @@ type FileSystemConfig struct {
 // outbound relay. Protocol ports default to the registered standards; TLS mode
 // is explicit so deployments can use STARTTLS or implicit TLS where required.
 type MailConfig struct {
-	Relay RelayConfig    `mapstructure:"relay"`
-	SMTP  ListenerConfig `mapstructure:"smtp"`
-	IMAP  ListenerConfig `mapstructure:"imap"`
-	POP3  ListenerConfig `mapstructure:"pop3"`
+	Domain string         `mapstructure:"domain"`
+	Relay  RelayConfig    `mapstructure:"relay"`
+	SMTP   ListenerConfig `mapstructure:"smtp"`
+	IMAP   ListenerConfig `mapstructure:"imap"`
+	POP3   ListenerConfig `mapstructure:"pop3"`
 }
 
 type RelayConfig struct {
@@ -123,6 +124,7 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("filesystem.target", "")
 	v.SetDefault("filesystem.useTLS", false)
 	v.SetDefault("filesystem.tlsSkipVerify", false)
+	v.SetDefault("mail.domain", "")
 	v.SetDefault("mail.relay.adapter", "")
 	v.SetDefault("mail.relay.port", "587")
 	v.SetDefault("mail.relay.tlsMode", "starttls")
@@ -161,6 +163,7 @@ func applyEnvOverrides(v *viper.Viper) {
 	setEnvIfPresent(v, "database.dsn", "DATABASE_DSN")
 	setEnvIfPresent(v, "auth.target", "AUTH_TARGET")
 	setEnvIfPresent(v, "filesystem.target", "FILESYSTEM_TARGET")
+	setEnvIfPresent(v, "mail.domain", "MAIL_DOMAIN")
 	setEnvIfPresent(v, "mail.relay.adapter", "MAIL_RELAY_ADAPTER")
 	setEnvIfPresent(v, "mail.relay.host", "MAIL_RELAY_HOST")
 	setEnvIfPresent(v, "mail.relay.port", "MAIL_RELAY_PORT")

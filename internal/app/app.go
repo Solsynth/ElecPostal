@@ -54,6 +54,7 @@ func New(cfg *config.Config) (*App, error) {
 	}
 
 	emailSvc := service.NewEmailService(db, notifier)
+	emailSvc.SetDomain(cfg.Mail.Domain)
 	switch cfg.Mail.Relay.Adapter {
 	case "direct-smtp":
 		directRelay, err := relay.NewDirectSMTPAdapter(relay.DirectSMTPConfig{

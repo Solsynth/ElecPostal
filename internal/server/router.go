@@ -27,6 +27,10 @@ func NewRouter(cfg *config.Config, emailSvc *service.EmailService) *gin.Engine {
 	api := r.Group("/api")
 	handler.RegisterRoutes(api, emailSvc)
 
+	api.GET("/mail/host", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"host": emailSvc.MailHost()})
+	})
+
 	r.NoRoute(func(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 	})
