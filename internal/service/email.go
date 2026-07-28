@@ -69,27 +69,39 @@ func (s *EmailService) DB() *database.DB {
 	return s.db
 }
 
-// ListMailboxes returns all mailboxes for an account.
-func (s *EmailService) ListMailboxes(ctx context.Context, accountID uuid.UUID) ([]database.Mailbox, error) {
+// ListMailboxes returns all mailboxes for an account. When a workspace ID is
+// provided, it filters to that workspace; otherwise it returns mailboxes owned
+// by the account (typically the individual workspace).
+func (s *EmailService) ListMailboxes(ctx context.Context, accountID uuid.UUID, workspaceID string) ([]database.Mailbox, error) {
 	var items []database.Mailbox
-	if err := s.db.WithContext(ctx).Where("account_id = ?", accountID).Order("created_at desc").Find(&items).Error; err != nil {
+	query := s.db.WithContext(ctx).Order("created_at desc")
+	if strings.TrimSpace(workspaceID) != "" {
+		query = query.Where("workspace_id = ?", workspaceID)
+	} else {
+		query = query.Where("account_id = ?", accountID)
+	}
+	if err := query.Find(&items).Error; err != nil {
 		return nil, err
 	}
 	return items, nil
 }
 
-// CreateMailbox creates a new mailbox for an account.
-func (s *EmailService) CreateMailbox(ctx context.Context, accountID uuid.UUID, address, name string, isDefault bool) (*database.Mailbox, error) {
+// CreateMailbox creates a new mailbox for an account/workspace.
+func (s *EmailService) CreateMailbox(ctx context.Context, accountID uuid.UUID, workspaceID, address, name string, isDefault bool) (*database.Mailbox, error) {
 	address = strings.TrimSpace(strings.ToLower(address))
 	if address == "" {
 		return nil, fmt.Errorf("address is required")
 	}
+	if strings.TrimSpace(workspaceID) == "" {
+		return nil, fmt.Errorf("workspace_id is required")
+	}
 
 	mailbox := database.Mailbox{
-		AccountID: accountID,
-		Address:   address,
-		Name:      strings.TrimSpace(name),
-		IsDefault: isDefault,
+		AccountID:   accountID,
+		WorkspaceID: workspaceID,
+		Address:     address,
+		Name:        strings.TrimSpace(name),
+		IsDefault:   isDefault,
 	}
 	if err := s.db.WithContext(ctx).Create(&mailbox).Error; err != nil {
 		return nil, err

@@ -9,9 +9,12 @@ import (
 )
 
 // Mailbox represents a user's email address within ElecPostal.
+// Each mailbox is linked to a DysonNetwork workspace. For personal mailboxes
+// this is the user's individual workspace.
 type Mailbox struct {
 	ID          string         `gorm:"primaryKey;size:36" json:"id"`
 	AccountID   uuid.UUID      `gorm:"index:idx_mailboxes_account_id" json:"account_id"`
+	WorkspaceID string         `gorm:"index:idx_mailboxes_workspace_id;size:36" json:"workspace_id"`
 	Address     string         `gorm:"uniqueIndex;size:255" json:"address"`
 	Name        string         `gorm:"size:128" json:"name"`
 	IsDefault   bool           `gorm:"index:idx_mailboxes_account_default" json:"is_default"`

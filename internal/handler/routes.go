@@ -38,7 +38,7 @@ func listMailboxes(c *gin.Context, emailSvc *service.EmailService) {
 		return
 	}
 
-	items, err := emailSvc.ListMailboxes(c.Request.Context(), uuid.MustParse(accountID))
+	items, err := emailSvc.ListMailboxes(c.Request.Context(), uuid.MustParse(accountID), c.Query("workspace_id"))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -54,16 +54,17 @@ func createMailbox(c *gin.Context, emailSvc *service.EmailService) {
 	}
 
 	var req struct {
-		Address   string `json:"address" binding:"required"`
-		Name      string `json:"name"`
-		IsDefault bool   `json:"is_default"`
+		WorkspaceID string `json:"workspace_id" binding:"required"`
+		Address     string `json:"address" binding:"required"`
+		Name        string `json:"name"`
+		IsDefault   bool   `json:"is_default"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	mailbox, err := emailSvc.CreateMailbox(c.Request.Context(), uuid.MustParse(accountID), req.Address, req.Name, req.IsDefault)
+	mailbox, err := emailSvc.CreateMailbox(c.Request.Context(), uuid.MustParse(accountID), req.WorkspaceID, req.Address, req.Name, req.IsDefault)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
