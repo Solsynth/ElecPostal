@@ -53,8 +53,10 @@ type SendEmailInput struct {
 	Bcc           []RecipientInput `json:"bcc"`
 	Subject       string           `json:"subject"`
 	Body          string           `json:"body"`
+	ContentType   string           `json:"content_type"` // text/plain or text/html
 	AttachmentIDs []string         `json:"attachment_ids"`
 	IsDraft       bool             `json:"is_draft"`
+	ScheduledAt   *time.Time       `json:"scheduled_at,omitempty"`
 }
 
 // IncomingAttachment contains the raw content delivered by another mail
@@ -75,6 +77,7 @@ type ReceiveEmailInput struct {
 	FromName    string
 	Subject     string
 	Body        string
+	ContentType string
 	To          []RecipientInput
 	Cc          []RecipientInput
 	Attachments []IncomingAttachment
@@ -91,6 +94,7 @@ type ListInput struct {
 	IsDraft        *bool
 	DeliveryStatus string
 	LabelID        string
+	Folder         string
 }
 
 // MailboxStats provides lightweight counts for mailbox navigation and filter badges.
@@ -101,6 +105,23 @@ type MailboxStats struct {
 	Drafts         int64            `json:"drafts"`
 	DeliveryStatus map[string]int64 `json:"delivery_status"`
 }
+
+// CreateBlockRuleInput creates a sender or domain rule for a mailbox or workspace.
+type CreateBlockRuleInput struct {
+	Scope       string `json:"scope" binding:"required"`
+	WorkspaceID string `json:"workspace_id"`
+	MailboxID   string `json:"mailbox_id"`
+	Pattern     string `json:"pattern" binding:"required"`
+}
+
+const (
+	folderInbox   = "inbox"
+	folderSent    = "sent"
+	folderDrafts  = "drafts"
+	folderSpam    = "spam"
+	folderTrash   = "trash"
+	folderArchive = "archive"
+)
 
 // MailboxQuota reports the active raw-email storage reserved from a workspace
 // plan. Attachments are excluded because DysonFS already charges them.
@@ -350,7 +371,47 @@ func (s *EmailService) emailListQuery(ctx context.Context, accountID uuid.UUID, 
 	if labelID := strings.TrimSpace(input.LabelID); labelID != "" {
 		query = query.Where("EXISTS (SELECT 1 FROM email_label_mappings WHERE email_label_mappings.email_id = emails.id AND email_label_mappings.label_id = ?)", labelID)
 	}
+	if folder := strings.TrimSpace(strings.ToLower(input.Folder)); folder != "" {
+		query = query.Where("emails.folder = ?", folder)
+	}
 	return query
+}
+
+// ListBlockRules returns block rules owned by the account.
+func (s *EmailService) ListBlockRules(ctx context.Context, accountID uuid.UUID) ([]database.MailBlockRule, error) {
+	var rules []database.MailBlockRule
+	err := s.db.WithContext(ctx).Where("account_id = ?", accountID).Order("created_at DESC").Find(&rules).Error
+	return rules, err
+}
+
+// CreateBlockRule validates scope ownership before persisting a sender/domain rule.
+func (s *EmailService) CreateBlockRule(ctx context.Context, accountID uuid.UUID, input CreateBlockRuleInput) (*database.MailBlockRule, error) {
+	pattern := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(input.Pattern, "@")))
+	if pattern == "" { return nil, fmt.Errorf("block pattern is required") }
+	rule := database.MailBlockRule{AccountID: accountID, Pattern: pattern}
+	switch strings.ToLower(strings.TrimSpace(input.Scope)) {
+	case "mailbox":
+		var mailbox database.Mailbox
+		if err := s.db.WithContext(ctx).Where("id = ? AND account_id = ?", input.MailboxID, accountID).First(&mailbox).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) { return nil, ErrNotFound }; return nil, err
+		}
+		rule.MailboxID = &mailbox.ID
+	case "workspace":
+		if strings.TrimSpace(input.WorkspaceID) == "" { return nil, fmt.Errorf("workspace_id is required for workspace rules") }
+		if err := s.authorizeWorkspaceMember(ctx, input.WorkspaceID, accountID); err != nil { return nil, err }
+		rule.WorkspaceID = &input.WorkspaceID
+	default: return nil, fmt.Errorf("scope must be mailbox or workspace")
+	}
+	if strings.Contains(pattern, "@") { rule.MatchType = "address" } else { rule.MatchType = "domain" }
+	if err := s.db.WithContext(ctx).Create(&rule).Error; err != nil { return nil, err }
+	return &rule, nil
+}
+
+func (s *EmailService) DeleteBlockRule(ctx context.Context, accountID uuid.UUID, id string) error {
+	result := s.db.WithContext(ctx).Where("id = ? AND account_id = ?", id, accountID).Delete(&database.MailBlockRule{})
+	if result.Error != nil { return result.Error }
+	if result.RowsAffected == 0 { return ErrNotFound }
+	return nil
 }
 
 // ListLabels returns the account's tags in a stable name order.
@@ -732,6 +793,10 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 		}
 		return nil, err
 	}
+	logging.Log.Info().
+		Str("mailbox_id", mailbox.ID).
+		Int("attachment_count", len(input.Attachments)).
+		Msg("receiving email")
 	mailboxLimit, err := s.workspaceMailboxLimit(ctx, mailbox.WorkspaceID)
 	if err != nil {
 		return nil, err
@@ -741,6 +806,7 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 	for _, attachment := range input.Attachments {
 		stored, err := s.storeIncomingAttachment(ctx, mailbox, attachment)
 		if err != nil {
+			logging.Log.Warn().Err(err).Str("mailbox_id", mailbox.ID).Msg("failed to store incoming email attachment")
 			return nil, err
 		}
 		attachments = append(attachments, stored)
@@ -785,8 +851,10 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 		return nil
 	})
 	if err != nil {
+		logging.Log.Error().Err(err).Str("mailbox_id", mailbox.ID).Msg("failed to persist incoming email")
 		return nil, err
 	}
+	logging.Log.Info().Str("email_id", email.ID).Str("mailbox_id", mailbox.ID).Msg("email received")
 	if err := s.enforceWorkspaceMailboxQuota(ctx, mailbox.WorkspaceID, mailboxLimit); err != nil {
 		return nil, err
 	}
