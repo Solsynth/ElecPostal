@@ -222,3 +222,5 @@ nullprogram.com/x/optparse v1.0.0/go.mod h1:KdyPE+Igbe0jQUrVfMqDMeJQIJZEuyV7pjYm
 rsc.io/pdf v0.1.1/go.mod h1:n8OzWcQ6Sp37PL01nO98y4iUCRdTGarVfzxY20ICaU4=
 src.solsynth.dev/sosys/go v0.2.1-0.20260719030106-e6cb4c4ac9b4 h1:hHgOR6wUDT5ITUt8YP4vVsgkueu1eK88QCpdJPEcwRY=
 src.solsynth.dev/sosys/go v0.2.1-0.20260719030106-e6cb4c4ac9b4/go.mod h1:obFYNjrUVgYLSHG30YlXUqFKvC+EejGTTuc7Aix8ugY=
+src.solsynth.dev/sosys/go v0.2.1-0.20260728110849-bc24e73f9cd2 h1:pQv0GacJrXusWikmK2KImdxKbslWjAVNaEQlXN+h8xg=
+src.solsynth.dev/sosys/go v0.2.1-0.20260728110849-bc24e73f9cd2/go.mod h1:obFYNjrUVgYLSHG30YlXUqFKvC+EejGTTuc7Aix8ugY=
