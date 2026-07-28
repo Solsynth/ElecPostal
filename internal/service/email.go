@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"gorm.io/gorm"
 
 	"src.solsynth.dev/sosys/elecpostal/internal/database"
+	"src.solsynth.dev/sosys/elecpostal/internal/filesystem"
 	"src.solsynth.dev/sosys/elecpostal/internal/logging"
 	"src.solsynth.dev/sosys/elecpostal/internal/solar"
 )
@@ -37,14 +39,38 @@ type AttachmentInput struct {
 
 // SendEmailInput is the payload for sending an email.
 type SendEmailInput struct {
-	MailboxID   string            `json:"mailbox_id" binding:"required"`
-	To          []RecipientInput  `json:"to" binding:"required,min=1"`
-	Cc          []RecipientInput  `json:"cc"`
-	Bcc         []RecipientInput  `json:"bcc"`
-	Subject     string            `json:"subject"`
-	Body        string            `json:"body"`
-	Attachments []AttachmentInput `json:"attachments"`
-	IsDraft     bool              `json:"is_draft"`
+	MailboxID     string           `json:"mailbox_id" binding:"required"`
+	To            []RecipientInput `json:"to" binding:"required,min=1"`
+	Cc            []RecipientInput `json:"cc"`
+	Bcc           []RecipientInput `json:"bcc"`
+	Subject       string           `json:"subject"`
+	Body          string           `json:"body"`
+	AttachmentIDs []string         `json:"attachment_ids"`
+	IsDraft       bool             `json:"is_draft"`
+}
+
+// IncomingAttachment contains the raw content delivered by another mail
+// service. ElecPostal owns the subsequent FileSystem upload.
+type IncomingAttachment struct {
+	Filename string
+	MimeType string
+	Size     int64
+	Content  io.Reader
+}
+
+// ReceiveEmailInput is the trusted interservice payload for an inbound email.
+// MailboxID identifies the local destination; ownership is never supplied by
+// the caller and is always resolved from that mailbox.
+type ReceiveEmailInput struct {
+	MailboxID   string
+	FromAddress string
+	FromName    string
+	Subject     string
+	Body        string
+	To          []RecipientInput
+	Cc          []RecipientInput
+	Attachments []IncomingAttachment
+	SentAt      *time.Time
 }
 
 // ListInput is pagination for list endpoints.
@@ -55,13 +81,29 @@ type ListInput struct {
 
 // EmailService handles email-related business logic.
 type EmailService struct {
-	db     *database.DB
-	solar  *solar.Client
+	db    *database.DB
+	solar *solar.Client
+	files filesystem.Uploader
 }
 
 // NewEmailService creates a new EmailService.
 func NewEmailService(db *database.DB, solarClient *solar.Client) *EmailService {
 	return &EmailService{db: db, solar: solarClient}
+}
+
+// SetAttachmentUploader enables streaming attachment uploads to FileSystem.
+// It is optional so deployments can continue accepting attachment IDs created
+// by another trusted service.
+func (s *EmailService) SetAttachmentUploader(uploader filesystem.Uploader) {
+	s.files = uploader
+}
+
+// Close releases resources held by optional downstream clients.
+func (s *EmailService) Close() error {
+	if s.files != nil {
+		return s.files.Close()
+	}
+	return nil
 }
 
 // DB returns the underlying database handle.
@@ -196,8 +238,12 @@ func (s *EmailService) SendEmail(ctx context.Context, accountID uuid.UUID, input
 				return err
 			}
 		}
-		for _, a := range input.Attachments {
-			if err := tx.Create(&database.Attachment{EmailID: email.ID, Filename: a.Filename, MimeType: a.MimeType, Size: a.Size, StorageKey: a.StorageKey}).Error; err != nil {
+		for _, attachmentID := range input.AttachmentIDs {
+			attachmentID = strings.TrimSpace(attachmentID)
+			if attachmentID == "" {
+				return fmt.Errorf("attachment_ids cannot contain empty values")
+			}
+			if err := tx.Create(&database.Attachment{EmailID: email.ID, StorageKey: &attachmentID}).Error; err != nil {
 				return err
 			}
 		}
@@ -215,6 +261,91 @@ func (s *EmailService) SendEmail(ctx context.Context, accountID uuid.UUID, input
 	}
 
 	return &email, nil
+}
+
+// ReceiveEmail stores a message received from another mail service. Raw
+// attachments are uploaded under the destination mailbox owner and workspace,
+// whereas outgoing messages retain the client-provided DysonFS IDs.
+func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput) (*database.Email, error) {
+	if strings.TrimSpace(input.MailboxID) == "" {
+		return nil, fmt.Errorf("mailbox_id is required")
+	}
+	if strings.TrimSpace(input.FromAddress) == "" {
+		return nil, fmt.Errorf("from_address is required")
+	}
+	var mailbox database.Mailbox
+	if err := s.db.WithContext(ctx).Where("id = ?", input.MailboxID).First(&mailbox).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+
+	attachments := make([]AttachmentInput, 0, len(input.Attachments))
+	for _, attachment := range input.Attachments {
+		stored, err := s.storeIncomingAttachment(ctx, mailbox, attachment)
+		if err != nil {
+			return nil, err
+		}
+		attachments = append(attachments, stored)
+	}
+
+	email := database.Email{
+		AccountID:   mailbox.AccountID,
+		MailboxID:   mailbox.ID,
+		Subject:     input.Subject,
+		Body:        input.Body,
+		FromAddress: input.FromAddress,
+		FromName:    input.FromName,
+		SentAt:      input.SentAt,
+	}
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&email).Error; err != nil {
+			return err
+		}
+		recipients := input.To
+		if len(recipients) == 0 {
+			recipients = []RecipientInput{{Address: mailbox.Address, Name: mailbox.Name, Kind: "to"}}
+		}
+		for _, recipient := range recipients {
+			if err := tx.Create(&database.Recipient{EmailID: email.ID, Address: recipient.Address, Name: recipient.Name, Kind: normalizeKind(recipient.Kind, "to")}).Error; err != nil {
+				return err
+			}
+		}
+		for _, recipient := range input.Cc {
+			if err := tx.Create(&database.Recipient{EmailID: email.ID, Address: recipient.Address, Name: recipient.Name, Kind: normalizeKind(recipient.Kind, "cc")}).Error; err != nil {
+				return err
+			}
+		}
+		for _, attachment := range attachments {
+			if err := tx.Create(&database.Attachment{EmailID: email.ID, Filename: attachment.Filename, MimeType: attachment.MimeType, Size: attachment.Size, StorageKey: attachment.StorageKey}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &email, nil
+}
+
+func (s *EmailService) storeIncomingAttachment(ctx context.Context, mailbox database.Mailbox, attachment IncomingAttachment) (AttachmentInput, error) {
+	if s.files == nil {
+		return AttachmentInput{}, fmt.Errorf("attachment uploads are not configured")
+	}
+	fileID, err := s.files.UploadAttachment(ctx, filesystem.AttachmentUpload{
+		AccountID:   mailbox.AccountID,
+		WorkspaceID: mailbox.WorkspaceID,
+		Filename:    attachment.Filename,
+		MimeType:    attachment.MimeType,
+		Size:        attachment.Size,
+		Content:     attachment.Content,
+	})
+	if err != nil {
+		return AttachmentInput{}, err
+	}
+	return AttachmentInput{Filename: attachment.Filename, MimeType: attachment.MimeType, Size: attachment.Size, StorageKey: &fileID}, nil
 }
 
 // DeleteEmail soft-deletes an email owned by the account.

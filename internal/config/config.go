@@ -15,6 +15,7 @@ type Config struct {
 	Database     DatabaseConfig     `mapstructure:"database"`
 	Redis        RedisConfig        `mapstructure:"redis"`
 	Auth         AuthConfig         `mapstructure:"auth"`
+	FileSystem   FileSystemConfig   `mapstructure:"filesystem"`
 	SolarNetwork SolarNetworkConfig `mapstructure:"solarNetwork"`
 	Sentry       SentryConfig       `mapstructure:"sentry"`
 }
@@ -48,6 +49,15 @@ type AuthConfig struct {
 	TLSSkipVerify bool   `mapstructure:"tlsSkipVerify"`
 }
 
+// FileSystemConfig configures the FileSystem gRPC service used for email
+// attachment contents. It is deliberately separate from the public HTTP URL:
+// attachments are uploaded server-to-server on behalf of the mailbox owner.
+type FileSystemConfig struct {
+	Target        string `mapstructure:"target"`
+	UseTLS        bool   `mapstructure:"useTLS"`
+	TLSSkipVerify bool   `mapstructure:"tlsSkipVerify"`
+}
+
 type SolarNetworkConfig struct {
 	BaseURL     string `mapstructure:"baseUrl"`
 	AccessToken string `mapstructure:"accessToken"`
@@ -76,6 +86,9 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("auth.target", "")
 	v.SetDefault("auth.useTLS", false)
 	v.SetDefault("auth.tlsSkipVerify", false)
+	v.SetDefault("filesystem.target", "")
+	v.SetDefault("filesystem.useTLS", false)
+	v.SetDefault("filesystem.tlsSkipVerify", false)
 	v.SetDefault("solarNetwork.baseUrl", "")
 	v.SetDefault("solarNetwork.accessToken", "")
 	v.SetDefault("solarNetwork.accountName", "")
@@ -104,6 +117,7 @@ func Load(configPath string) (*Config, error) {
 func applyEnvOverrides(v *viper.Viper) {
 	setEnvIfPresent(v, "database.dsn", "DATABASE_DSN")
 	setEnvIfPresent(v, "auth.target", "AUTH_TARGET")
+	setEnvIfPresent(v, "filesystem.target", "FILESYSTEM_TARGET")
 	setEnvIfPresent(v, "solarNetwork.baseUrl", "SOLAR_NETWORK_BASE_URL")
 	setEnvIfPresent(v, "solarNetwork.accessToken", "SOLAR_NETWORK_ACCESS_TOKEN")
 }

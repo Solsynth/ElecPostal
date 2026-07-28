@@ -15,6 +15,7 @@ import (
 
 	"src.solsynth.dev/sosys/elecpostal/internal/config"
 	"src.solsynth.dev/sosys/elecpostal/internal/database"
+	"src.solsynth.dev/sosys/elecpostal/internal/filesystem"
 	"src.solsynth.dev/sosys/elecpostal/internal/logging"
 	"src.solsynth.dev/sosys/elecpostal/internal/server"
 	"src.solsynth.dev/sosys/elecpostal/internal/service"
@@ -23,13 +24,13 @@ import (
 
 // App is the application runtime.
 type App struct {
-	cfg     *config.Config
-	db      *database.DB
+	cfg      *config.Config
+	db       *database.DB
 	emailSvc *service.EmailService
 	solarMgr *solar.Manager
-	httpSrv *http.Server
-	grpcSrv *grpc.Server
-	grpcLn  net.Listener
+	httpSrv  *http.Server
+	grpcSrv  *grpc.Server
+	grpcLn   net.Listener
 }
 
 // New creates a new App from configuration.
@@ -48,6 +49,13 @@ func New(cfg *config.Config) (*App, error) {
 	}
 
 	emailSvc := service.NewEmailService(db, solarClient)
+	if cfg.FileSystem.Target != "" {
+		fileClient, err := filesystem.NewClient(cfg.FileSystem.Target, cfg.FileSystem.UseTLS, cfg.FileSystem.TLSSkipVerify)
+		if err != nil {
+			return nil, err
+		}
+		emailSvc.SetAttachmentUploader(fileClient)
+	}
 	router := server.NewRouter(cfg, emailSvc)
 
 	httpSrv := &http.Server{
@@ -134,6 +142,9 @@ func (a *App) Stop(ctx context.Context) error {
 	}
 	if a.solarMgr != nil {
 		_ = a.solarMgr.Stop(ctx)
+	}
+	if a.emailSvc != nil {
+		_ = a.emailSvc.Close()
 	}
 	return nil
 }

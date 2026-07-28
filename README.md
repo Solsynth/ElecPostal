@@ -28,5 +28,14 @@ Key settings:
 - `grpc.useTLS`
 - `auth.target`
 - `auth.useTLS`
+- `filesystem.target` (optional FileSystem gRPC endpoint for inbound email attachments)
 - `solarNetwork.baseUrl`
 - `solarNetwork.accessToken`
+
+## Attachments
+
+Clients upload outgoing attachments to DysonFS first, then submit the returned
+file IDs as the `attachment_ids` string array to `POST /api/emails`. Inbound delivery
+services pass raw attachments to `EmailService.ReceiveEmail`; ElecPostal streams
+them to DysonFS under the destination mailbox's owner and workspace before it
+persists the email.
