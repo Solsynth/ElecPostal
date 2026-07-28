@@ -45,6 +45,11 @@ type Email struct {
 	IsRead                bool       `json:"is_read"`
 	IsStarred             bool       `json:"is_starred"`
 	IsDraft               bool       `gorm:"index:idx_emails_is_draft" json:"is_draft"`
+	Folder                string     `gorm:"index:idx_emails_folder;size:16" json:"folder"`
+	ContentType           string     `gorm:"size:32" json:"content_type"`
+	ScheduledAt           *time.Time `gorm:"index" json:"scheduled_at,omitempty"`
+	TrashedAt             *time.Time `gorm:"index" json:"trashed_at,omitempty"`
+	SpamAt                *time.Time `gorm:"index" json:"spam_at,omitempty"`
 	SentAt                *time.Time `json:"sent_at,omitempty"`
 	DeliveryStatus        string     `gorm:"index;size:32" json:"delivery_status"`
 	DeliveryAttempts      int        `json:"delivery_attempts"`
@@ -153,4 +158,25 @@ func (l *EmailLabel) BeforeCreate(tx *gorm.DB) error {
 type EmailLabelMapping struct {
 	EmailID string `gorm:"primaryKey;size:36" json:"email_id"`
 	LabelID string `gorm:"primaryKey;size:36" json:"label_id"`
+}
+
+// MailBlockRule prevents a sender or domain from reaching a mailbox or every
+// mailbox in a workspace. Matching mail is retained in Spam for review.
+type MailBlockRule struct {
+	ID          string         `gorm:"primaryKey;size:36" json:"id"`
+	AccountID   uuid.UUID      `gorm:"index:idx_mail_block_rules_account_id" json:"account_id"`
+	WorkspaceID *string        `gorm:"index;size:36" json:"workspace_id,omitempty"`
+	MailboxID   *string        `gorm:"index;size:36" json:"mailbox_id,omitempty"`
+	Pattern     string         `gorm:"size:255" json:"pattern"`
+	MatchType   string         `gorm:"size:16" json:"match_type"` // address or domain
+	DeletedAt   gorm.DeletedAt `gorm:"index" json:"deleted_at"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+}
+
+func (r *MailBlockRule) BeforeCreate(tx *gorm.DB) error {
+	if r.ID == "" {
+		r.ID = NewID()
+	}
+	return nil
 }

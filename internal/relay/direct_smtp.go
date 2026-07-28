@@ -178,7 +178,13 @@ func formatMessage(message Message) []byte {
 	}
 	buffer.WriteString("\r\nSubject: ")
 	buffer.WriteString(message.Subject)
-	buffer.WriteString("\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n")
+	contentType := message.ContentType
+	if contentType != "text/html" {
+		contentType = "text/plain"
+	}
+	buffer.WriteString("\r\nMIME-Version: 1.0\r\nContent-Type: ")
+	buffer.WriteString(contentType)
+	buffer.WriteString("; charset=utf-8\r\n\r\n")
 	buffer.WriteString(message.Body)
 	return buffer.Bytes()
 }

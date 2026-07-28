@@ -49,6 +49,8 @@ port = "587"               # submission default; use 25 for relay or 465 for imp
 tlsMode = "starttls"
 certFile = ""
 keyFile = ""
+maxMessageBytes = 26214400
+maxRecipients = 100
 
 [mail.imap]
 enabled = true
@@ -68,6 +70,12 @@ keyFile = ""
 
 [ring]
 target = ""              # Ring gRPC target (host:port); leave empty to disable notifications
+useTLS = false
+tlsSkipVerify = false
+
+[websocket]
+# DysonNetwork WebSocket gateway gRPC endpoint for mail.* realtime packets.
+target = ""
 useTLS = false
 tlsSkipVerify = false
 

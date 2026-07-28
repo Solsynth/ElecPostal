@@ -14,6 +14,7 @@ import (
 	"src.solsynth.dev/sosys/elecpostal/internal/database"
 	"src.solsynth.dev/sosys/elecpostal/internal/filesystem"
 	"src.solsynth.dev/sosys/elecpostal/internal/logging"
+	"src.solsynth.dev/sosys/elecpostal/internal/realtime"
 	"src.solsynth.dev/sosys/elecpostal/internal/relay"
 	"src.solsynth.dev/sosys/elecpostal/internal/workspace"
 )
@@ -24,6 +25,11 @@ var (
 	ErrWorkspaceUnavailable = errors.New("workspace quota service is not configured")
 	ErrMailboxLimitExceeded = errors.New("workspace mailbox limit exceeded")
 )
+
+var reservedMailboxLocalParts = map[string]struct{}{
+	"admin": {}, "administrator": {}, "abuse": {}, "hostmaster": {},
+	"postmaster": {}, "security": {}, "webmaster": {},
+}
 
 const (
 	mailStorageFractionDivisor int64 = 10
@@ -48,6 +54,8 @@ type AttachmentInput struct {
 // SendEmailInput is the payload for sending an email.
 type SendEmailInput struct {
 	MailboxID     string           `json:"mailbox_id" binding:"required"`
+	ThreadID      string           `json:"thread_id,omitempty"`
+	ReplyToID     string           `json:"reply_to_id,omitempty"`
 	To            []RecipientInput `json:"to" binding:"required,min=1"`
 	Cc            []RecipientInput `json:"cc"`
 	Bcc           []RecipientInput `json:"bcc"`
@@ -73,6 +81,7 @@ type IncomingAttachment struct {
 // the caller and is always resolved from that mailbox.
 type ReceiveEmailInput struct {
 	MailboxID   string
+	ThreadID    string
 	FromAddress string
 	FromName    string
 	Subject     string
@@ -106,6 +115,18 @@ type MailboxStats struct {
 	DeliveryStatus map[string]int64 `json:"delivery_status"`
 }
 
+// ThreadSummary is one conversation row suitable for a mailbox list.
+type ThreadSummary struct {
+	ID            string         `json:"id"`
+	MailboxID     string         `json:"mailbox_id"`
+	Subject       string         `json:"subject"`
+	LatestAt      time.Time      `json:"latest_at"`
+	MessageCount  int64          `json:"message_count"`
+	UnreadCount   int64          `json:"unread_count"`
+	Participants  []string       `json:"participants"`
+	LatestMessage database.Email `json:"latest_message"`
+}
+
 // CreateBlockRuleInput creates a sender or domain rule for a mailbox or workspace.
 type CreateBlockRuleInput struct {
 	Scope       string `json:"scope" binding:"required"`
@@ -136,6 +157,7 @@ type MailboxQuota struct {
 type EmailService struct {
 	db        *database.DB
 	notifier  NotificationSender
+	realtime  realtime.Publisher
 	files     filesystem.Uploader
 	relay     relay.Adapter
 	workspace workspace.Provider
@@ -147,6 +169,9 @@ type EmailService struct {
 func (s *EmailService) SetRelay(adapter relay.Adapter) {
 	s.relay = adapter
 }
+
+// SetRealtimePublisher enables non-blocking mailbox change pushes.
+func (s *EmailService) SetRealtimePublisher(publisher realtime.Publisher) { s.realtime = publisher }
 
 // SetDomain configures the canonical mail domain used to complete local-only
 // mailbox addresses (e.g. "alice" -> "alice@example.com") for outbound relay.
@@ -164,6 +189,32 @@ func (s *EmailService) MailHost() string {
 	return s.domain
 }
 
+// ResolveLocalMailbox finds a mailbox that may receive SMTP mail. postmaster
+// is intentionally an alias only at delivery time; it can never be created as
+// a normal mailbox address.
+func (s *EmailService) ResolveLocalMailbox(ctx context.Context, address string) (*database.Mailbox, error) {
+	address = strings.ToLower(strings.TrimSpace(address))
+	at := strings.LastIndex(address, "@")
+	if at <= 0 || at == len(address)-1 || s.domain == "" || address[at+1:] != s.domain {
+		return nil, ErrNotFound
+	}
+	localPart := address[:at]
+	var mailbox database.Mailbox
+	query := s.db.WithContext(ctx)
+	if localPart == "postmaster" {
+		query = query.Where("is_default = ?", true).Order("created_at ASC")
+	} else {
+		query = query.Where("LOWER(address) = ?", address)
+	}
+	if err := query.First(&mailbox).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &mailbox, nil
+}
+
 // normalizeFromAddress returns a full email address for the mailbox. When the
 // configured domain is present and the stored address lacks one, it appends it.
 func (s *EmailService) normalizeFromAddress(address string) string {
@@ -177,7 +228,7 @@ func (s *EmailService) normalizeFromAddress(address string) string {
 // NotificationSender is the gRPC notification capability required by the
 // email domain without coupling it to a particular service implementation.
 type NotificationSender interface {
-	SendEmailNotification(context.Context, string, string) error
+	SendEmailNotification(context.Context, string, string, string, string) error
 	Close() error
 }
 
@@ -213,6 +264,11 @@ func (s *EmailService) Close() error {
 	}
 	if s.workspace != nil {
 		if err := s.workspace.Close(); err != nil {
+			return err
+		}
+	}
+	if s.realtime != nil {
+		if err := s.realtime.Close(); err != nil {
 			return err
 		}
 	}
@@ -252,6 +308,10 @@ func (s *EmailService) CreateMailbox(ctx context.Context, accountID uuid.UUID, w
 	}
 	if strings.TrimSpace(workspaceID) == "" {
 		return nil, fmt.Errorf("workspace_id is required")
+	}
+	localPart := strings.Split(address, "@")[0]
+	if _, reserved := reservedMailboxLocalParts[localPart]; reserved {
+		return nil, fmt.Errorf("mailbox local-part %q is reserved", localPart)
 	}
 	if err := s.authorizeWorkspaceMember(ctx, workspaceID, accountID); err != nil {
 		return nil, err
@@ -387,30 +447,50 @@ func (s *EmailService) ListBlockRules(ctx context.Context, accountID uuid.UUID) 
 // CreateBlockRule validates scope ownership before persisting a sender/domain rule.
 func (s *EmailService) CreateBlockRule(ctx context.Context, accountID uuid.UUID, input CreateBlockRuleInput) (*database.MailBlockRule, error) {
 	pattern := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(input.Pattern, "@")))
-	if pattern == "" { return nil, fmt.Errorf("block pattern is required") }
+	if pattern == "" {
+		return nil, fmt.Errorf("block pattern is required")
+	}
 	rule := database.MailBlockRule{AccountID: accountID, Pattern: pattern}
 	switch strings.ToLower(strings.TrimSpace(input.Scope)) {
 	case "mailbox":
 		var mailbox database.Mailbox
 		if err := s.db.WithContext(ctx).Where("id = ? AND account_id = ?", input.MailboxID, accountID).First(&mailbox).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) { return nil, ErrNotFound }; return nil, err
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, ErrNotFound
+			}
+			return nil, err
 		}
 		rule.MailboxID = &mailbox.ID
 	case "workspace":
-		if strings.TrimSpace(input.WorkspaceID) == "" { return nil, fmt.Errorf("workspace_id is required for workspace rules") }
-		if err := s.authorizeWorkspaceMember(ctx, input.WorkspaceID, accountID); err != nil { return nil, err }
+		if strings.TrimSpace(input.WorkspaceID) == "" {
+			return nil, fmt.Errorf("workspace_id is required for workspace rules")
+		}
+		if err := s.authorizeWorkspaceMember(ctx, input.WorkspaceID, accountID); err != nil {
+			return nil, err
+		}
 		rule.WorkspaceID = &input.WorkspaceID
-	default: return nil, fmt.Errorf("scope must be mailbox or workspace")
+	default:
+		return nil, fmt.Errorf("scope must be mailbox or workspace")
 	}
-	if strings.Contains(pattern, "@") { rule.MatchType = "address" } else { rule.MatchType = "domain" }
-	if err := s.db.WithContext(ctx).Create(&rule).Error; err != nil { return nil, err }
+	if strings.Contains(pattern, "@") {
+		rule.MatchType = "address"
+	} else {
+		rule.MatchType = "domain"
+	}
+	if err := s.db.WithContext(ctx).Create(&rule).Error; err != nil {
+		return nil, err
+	}
 	return &rule, nil
 }
 
 func (s *EmailService) DeleteBlockRule(ctx context.Context, accountID uuid.UUID, id string) error {
 	result := s.db.WithContext(ctx).Where("id = ? AND account_id = ?", id, accountID).Delete(&database.MailBlockRule{})
-	if result.Error != nil { return result.Error }
-	if result.RowsAffected == 0 { return ErrNotFound }
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrNotFound
+	}
 	return nil
 }
 
@@ -490,6 +570,79 @@ func (s *EmailService) GetEmail(ctx context.Context, accountID uuid.UUID, id str
 	return &email, nil
 }
 
+// ListThreads returns one summary per conversation, newest activity first.
+func (s *EmailService) ListThreads(ctx context.Context, accountID uuid.UUID, mailboxID string, input ListInput) ([]ThreadSummary, int64, error) {
+	query := s.emailListQuery(ctx, accountID, input)
+	if strings.TrimSpace(mailboxID) != "" {
+		query = query.Where("emails.mailbox_id = ?", mailboxID)
+	}
+	var messages []database.Email
+	if err := query.Order("emails.created_at DESC").Preload("Recipients").Preload("Mailbox").Preload("Labels").Find(&messages).Error; err != nil {
+		return nil, 0, err
+	}
+	groups := make(map[string]*ThreadSummary)
+	ordered := make([]string, 0)
+	for _, message := range messages {
+		threadID := message.ID
+		if message.ThreadID != nil && *message.ThreadID != "" {
+			threadID = *message.ThreadID
+		}
+		group := groups[threadID]
+		if group == nil {
+			group = &ThreadSummary{ID: threadID, MailboxID: message.MailboxID, Subject: message.Subject, LatestAt: message.CreatedAt, LatestMessage: message}
+			groups[threadID] = group
+			ordered = append(ordered, threadID)
+		}
+		group.MessageCount++
+		if !message.IsRead {
+			group.UnreadCount++
+		}
+		for _, recipient := range message.Recipients {
+			group.Participants = appendUnique(group.Participants, recipient.Address)
+		}
+		if message.FromAddress != "" {
+			group.Participants = appendUnique(group.Participants, message.FromAddress)
+		}
+	}
+	total := int64(len(ordered))
+	take := input.Take
+	if take <= 0 {
+		take = 20
+	}
+	start, end := input.Offset, input.Offset+take
+	if start > len(ordered) {
+		start = len(ordered)
+	}
+	if end > len(ordered) {
+		end = len(ordered)
+	}
+	items := make([]ThreadSummary, 0, end-start)
+	for _, id := range ordered[start:end] {
+		items = append(items, *groups[id])
+	}
+	return items, total, nil
+}
+
+func (s *EmailService) GetThread(ctx context.Context, accountID uuid.UUID, threadID string) ([]database.Email, error) {
+	var messages []database.Email
+	if err := s.db.WithContext(ctx).Where("account_id = ? AND thread_id = ?", accountID, threadID).Order("created_at ASC").Preload("Recipients").Preload("Attachments").Preload("Mailbox").Preload("Labels").Find(&messages).Error; err != nil {
+		return nil, err
+	}
+	if len(messages) == 0 {
+		return nil, ErrNotFound
+	}
+	return messages, nil
+}
+
+func appendUnique(values []string, value string) []string {
+	for _, item := range values {
+		if item == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
 // GetMailboxQuota returns the 10% raw-email allocation and its current use
 // for the mailbox's workspace.
 func (s *EmailService) GetMailboxQuota(ctx context.Context, accountID uuid.UUID, mailboxID string) (MailboxQuota, error) {
@@ -527,6 +680,11 @@ func (s *EmailService) SendEmail(ctx context.Context, accountID uuid.UUID, input
 	if err := s.authorizeWorkspaceMember(ctx, mailbox.WorkspaceID, accountID); err != nil {
 		return nil, err
 	}
+	threadID, err := s.resolveThreadID(ctx, accountID, input.ThreadID, input.ReplyToID)
+	if err != nil {
+		return nil, err
+	}
+	input.ThreadID = threadID
 	mailboxLimit, err := s.workspaceMailboxLimit(ctx, mailbox.WorkspaceID)
 	if err != nil {
 		return nil, err
@@ -536,15 +694,28 @@ func (s *EmailService) SendEmail(ctx context.Context, accountID uuid.UUID, input
 	email := database.Email{
 		AccountID:      accountID,
 		MailboxID:      input.MailboxID,
+		ThreadID:       &threadID,
 		Subject:        input.Subject,
 		Body:           input.Body,
 		FromAddress:    fromAddress,
 		FromName:       mailbox.Name,
 		IsDraft:        input.IsDraft,
 		DeliveryStatus: "draft",
+		Folder:         folderSent,
+		ContentType:    normalizeContentType(input.ContentType),
+	}
+	if input.IsDraft {
+		email.Folder = folderDrafts
+	}
+	if input.ScheduledAt != nil && !input.IsDraft {
+		if !input.ScheduledAt.After(time.Now()) {
+			return nil, fmt.Errorf("scheduled_at must be in the future")
+		}
+		email.ScheduledAt = input.ScheduledAt
+		email.DeliveryStatus = "scheduled"
 	}
 	email.RawSizeBytes = outgoingRawSize(email, input)
-	if !input.IsDraft {
+	if !input.IsDraft && email.ScheduledAt == nil {
 		email.DeliveryStatus = "pending"
 		now := time.Now()
 		email.LastDeliveryAttemptAt = &now
@@ -587,7 +758,7 @@ func (s *EmailService) SendEmail(ctx context.Context, accountID uuid.UUID, input
 	if err := s.enforceWorkspaceMailboxQuota(ctx, mailbox.WorkspaceID, mailboxLimit); err != nil {
 		return nil, err
 	}
-	if input.IsDraft {
+	if input.IsDraft || email.ScheduledAt != nil {
 		return &email, nil
 	}
 	if err := s.deliverStoredEmail(ctx, &email, outgoingRelayMessage(mailbox, fromAddress, input)); err != nil {
@@ -595,6 +766,37 @@ func (s *EmailService) SendEmail(ctx context.Context, accountID uuid.UUID, input
 	}
 
 	return &email, nil
+}
+
+func (s *EmailService) resolveThreadID(ctx context.Context, accountID uuid.UUID, requestedThreadID, replyToID string) (string, error) {
+	requestedThreadID, replyToID = strings.TrimSpace(requestedThreadID), strings.TrimSpace(replyToID)
+	if requestedThreadID != "" && replyToID != "" {
+		return "", fmt.Errorf("provide thread_id or reply_to_id, not both")
+	}
+	if replyToID != "" {
+		var parent database.Email
+		if err := s.db.WithContext(ctx).Where("id = ? AND account_id = ?", replyToID, accountID).First(&parent).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return "", ErrNotFound
+			}
+			return "", err
+		}
+		if parent.ThreadID != nil && *parent.ThreadID != "" {
+			return *parent.ThreadID, nil
+		}
+		return parent.ID, nil
+	}
+	if requestedThreadID != "" {
+		var count int64
+		if err := s.db.WithContext(ctx).Model(&database.Email{}).Where("thread_id = ? AND account_id = ?", requestedThreadID, accountID).Count(&count).Error; err != nil {
+			return "", err
+		}
+		if count == 0 {
+			return "", ErrNotFound
+		}
+		return requestedThreadID, nil
+	}
+	return database.NewID(), nil
 }
 
 // ResendEmail retries an existing non-draft outbound message. The delivery
@@ -690,6 +892,8 @@ func outgoingRelayMessage(mailbox database.Mailbox, fromAddress string, input Se
 		FromName:      mailbox.Name,
 		Subject:       input.Subject,
 		Body:          input.Body,
+		ContentType:   normalizeContentType(input.ContentType),
+		ThreadID:      input.ThreadID,
 		AttachmentIDs: input.AttachmentIDs,
 	}
 	for _, recipient := range input.To {
@@ -710,6 +914,8 @@ func relayMessageFromEmail(email database.Email) relay.Message {
 		FromName:    email.FromName,
 		Subject:     email.Subject,
 		Body:        email.Body,
+		ContentType: email.ContentType,
+		ThreadID:    dereferenceString(email.ThreadID),
 	}
 	for _, recipient := range email.Recipients {
 		switch recipient.Kind {
@@ -754,10 +960,12 @@ func (s *EmailService) DeliverLocal(ctx context.Context, message relay.Message, 
 		}
 		if _, err := s.ReceiveEmail(ctx, ReceiveEmailInput{
 			MailboxID:   mailbox.ID,
+			ThreadID:    message.ThreadID,
 			FromAddress: message.FromAddress,
 			FromName:    message.FromName,
 			Subject:     message.Subject,
 			Body:        message.Body,
+			ContentType: message.ContentType,
 			To:          localRecipientInputs(message.To, "to"),
 			Cc:          localRecipientInputs(message.Cc, "cc"),
 			SentAt:      &now,
@@ -820,6 +1028,18 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 		FromAddress: input.FromAddress,
 		FromName:    input.FromName,
 		SentAt:      input.SentAt,
+		Folder:      folderInbox,
+		ContentType: normalizeContentType(input.ContentType),
+	}
+	threadID := strings.TrimSpace(input.ThreadID)
+	if threadID == "" {
+		threadID = database.NewID()
+	}
+	email.ThreadID = &threadID
+	if s.shouldRouteToSpam(ctx, mailbox, input.FromAddress, input.Subject, input.Body) {
+		email.Folder = folderSpam
+		now := time.Now()
+		email.SpamAt = &now
 	}
 	email.RawSizeBytes = incomingRawSize(email, input)
 	if len(input.To) == 0 {
@@ -858,11 +1078,12 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 	if err := s.enforceWorkspaceMailboxQuota(ctx, mailbox.WorkspaceID, mailboxLimit); err != nil {
 		return nil, err
 	}
-	if s.notifier != nil {
-		if err := s.notifier.SendEmailNotification(ctx, mailbox.AccountID.String(), input.Subject); err != nil {
+	if s.notifier != nil && email.Folder == folderInbox {
+		if err := s.notifier.SendEmailNotification(ctx, mailbox.AccountID.String(), email.ID, input.Subject, input.FromName); err != nil {
 			logging.Log.Warn().Err(err).Str("account_id", mailbox.AccountID.String()).Msg("failed to send incoming email notification")
 		}
 	}
+	s.publishMailEvent(ctx, email.AccountID.String(), "mail.created", &email)
 	return &email, nil
 }
 
@@ -884,9 +1105,11 @@ func (s *EmailService) storeIncomingAttachment(ctx context.Context, mailbox data
 	return AttachmentInput{Filename: attachment.Filename, MimeType: attachment.MimeType, Size: attachment.Size, StorageKey: &fileID}, nil
 }
 
-// DeleteEmail soft-deletes an email owned by the account.
+// DeleteEmail moves a message to Trash. Permanent deletion remains reserved for
+// the retention worker so users can recover accidental deletes.
 func (s *EmailService) DeleteEmail(ctx context.Context, accountID uuid.UUID, id string) error {
-	result := s.db.WithContext(ctx).Where("id = ? AND account_id = ?", id, accountID).Delete(&database.Email{})
+	now := time.Now()
+	result := s.db.WithContext(ctx).Model(&database.Email{}).Where("id = ? AND account_id = ?", id, accountID).Updates(map[string]any{"folder": folderTrash, "trashed_at": now})
 	if result.Error != nil {
 		return result.Error
 	}
@@ -894,6 +1117,125 @@ func (s *EmailService) DeleteEmail(ctx context.Context, accountID uuid.UUID, id 
 		return ErrNotFound
 	}
 	return nil
+}
+
+// MoveEmail changes a message's mailbox folder and records the relevant state.
+func (s *EmailService) MoveEmail(ctx context.Context, accountID uuid.UUID, id, folder string) error {
+	folder = strings.ToLower(strings.TrimSpace(folder))
+	if !validFolder(folder) {
+		return fmt.Errorf("invalid folder")
+	}
+	updates := map[string]any{"folder": folder}
+	now := time.Now()
+	switch folder {
+	case folderTrash:
+		updates["trashed_at"] = now
+	case folderSpam:
+		updates["spam_at"] = now
+	default:
+		updates["trashed_at"] = nil
+	}
+	result := s.db.WithContext(ctx).Model(&database.Email{}).Where("id = ? AND account_id = ?", id, accountID).Updates(updates)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	if s.realtime != nil {
+		if err := s.realtime.Publish(ctx, accountID.String(), "mail.moved", map[string]string{"id": id, "folder": folder}); err != nil {
+			logging.Log.Warn().Err(err).Msg("publish mail move")
+		}
+	}
+	return nil
+}
+
+func (s *EmailService) publishMailEvent(ctx context.Context, accountID, eventType string, email *database.Email) {
+	if s.realtime == nil {
+		return
+	}
+	if err := s.realtime.Publish(ctx, accountID, eventType, email); err != nil {
+		logging.Log.Warn().Err(err).Str("event", eventType).Msg("publish mail websocket event")
+	}
+}
+
+// DeliverScheduledEmails attempts all due scheduled messages. It is safe to
+// invoke periodically; claiming messages in a transaction avoids duplicate sends.
+func (s *EmailService) DeliverScheduledEmails(ctx context.Context) (int64, error) {
+	var emails []database.Email
+	if err := s.db.WithContext(ctx).Where("scheduled_at <= ? AND delivery_status = ?", time.Now(), "scheduled").Preload("Mailbox").Preload("Recipients").Preload("Attachments").Find(&emails).Error; err != nil {
+		return 0, err
+	}
+	var delivered int64
+	for i := range emails {
+		email := &emails[i]
+		now := time.Now()
+		claimed := s.db.WithContext(ctx).Model(&database.Email{}).Where("id = ? AND delivery_status = ?", email.ID, "scheduled").Updates(map[string]any{"scheduled_at": nil, "delivery_status": "pending", "last_delivery_attempt_at": now, "delivery_attempts": email.DeliveryAttempts + 1})
+		if claimed.Error != nil {
+			return delivered, claimed.Error
+		}
+		if claimed.RowsAffected == 0 {
+			continue
+		}
+		email.ScheduledAt = nil
+		email.DeliveryStatus = "pending"
+		email.LastDeliveryAttemptAt = &now
+		email.DeliveryAttempts++
+		if err := s.deliverStoredEmail(ctx, email, relayMessageFromEmail(*email)); err != nil {
+			logging.Log.Warn().Err(err).Str("email_id", email.ID).Msg("scheduled delivery failed")
+		}
+		delivered++
+	}
+	return delivered, nil
+}
+
+func validFolder(folder string) bool {
+	switch folder {
+	case folderInbox, folderSent, folderDrafts, folderSpam, folderTrash, folderArchive:
+		return true
+	default:
+		return false
+	}
+}
+func normalizeContentType(contentType string) string {
+	if strings.EqualFold(strings.TrimSpace(contentType), "text/html") {
+		return "text/html"
+	}
+	return "text/plain"
+}
+
+func dereferenceString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func (s *EmailService) shouldRouteToSpam(ctx context.Context, mailbox database.Mailbox, fromAddress, subject, body string) bool {
+	if s.isBlocked(ctx, mailbox, fromAddress) {
+		return true
+	}
+	text := strings.ToLower(subject + " " + body)
+	for _, phrase := range []string{"viagra", "bitcoin giveaway", "urgent wire transfer", "click here to claim"} {
+		if strings.Contains(text, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *EmailService) isBlocked(ctx context.Context, mailbox database.Mailbox, fromAddress string) bool {
+	address := strings.ToLower(strings.TrimSpace(fromAddress))
+	at := strings.LastIndex(address, "@")
+	domain := address
+	if at >= 0 {
+		domain = address[at+1:]
+	}
+	var count int64
+	if err := s.db.WithContext(ctx).Model(&database.MailBlockRule{}).Where("account_id = ? AND ((mailbox_id = ? AND match_type = 'address' AND pattern = ?) OR (mailbox_id = ? AND match_type = 'domain' AND pattern = ?) OR (workspace_id = ? AND match_type = 'address' AND pattern = ?) OR (workspace_id = ? AND match_type = 'domain' AND pattern = ?))", mailbox.AccountID, mailbox.ID, address, mailbox.ID, domain, mailbox.WorkspaceID, address, mailbox.WorkspaceID, domain).Count(&count).Error; err != nil {
+		logging.Log.Warn().Err(err).Msg("evaluate mail block rules")
+	}
+	return count > 0
 }
 
 // PurgeArchivedEmails permanently removes raw email records whose 30-day

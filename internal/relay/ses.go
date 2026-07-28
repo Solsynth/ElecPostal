@@ -65,16 +65,21 @@ func (a *SESAdapter) Send(ctx context.Context, message Message) (DeliveryResult,
 			CcAddresses:  message.Cc,
 			BccAddresses: message.Bcc,
 		},
-		Content: &types.EmailContent{Simple: &types.Message{
-			Subject: &types.Content{Data: aws.String(message.Subject), Charset: aws.String("UTF-8")},
-			Body:    &types.Body{Text: &types.Content{Data: aws.String(message.Body), Charset: aws.String("UTF-8")}},
-		}},
+		Content: &types.EmailContent{Simple: sesMessage(message)},
 	})
 	if err != nil {
 		return DeliveryResult{}, fmt.Errorf("send email with SES: %w", err)
 	}
 	logging.Log.Debug().Str("provider_message_id", aws.ToString(output.MessageId)).Int("recipient_count", len(recipients)).Msg("SES accepted email")
 	return DeliveryResult{ProviderMessageID: aws.ToString(output.MessageId)}, nil
+}
+
+func sesMessage(message Message) *types.Message {
+	body := &types.Body{Text: &types.Content{Data: aws.String(message.Body), Charset: aws.String("UTF-8")}}
+	if message.ContentType == "text/html" {
+		body = &types.Body{Html: &types.Content{Data: aws.String(message.Body), Charset: aws.String("UTF-8")}}
+	}
+	return &types.Message{Subject: &types.Content{Data: aws.String(message.Subject), Charset: aws.String("UTF-8")}, Body: body}
 }
 
 func (a *SESAdapter) Close() error { return nil }

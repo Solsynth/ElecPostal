@@ -4,6 +4,7 @@ package ring
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -37,14 +38,26 @@ func NewClient(target string, useTLS, tlsSkipVerify bool) (*Client, error) {
 	return &Client{conn: conn, client: gen.NewDyRingServiceClient(conn)}, nil
 }
 
-func (c *Client) SendEmailNotification(ctx context.Context, accountID, subject string) error {
-	_, err := c.client.SendPushNotificationToUser(ctx, &gen.DySendPushNotificationToUserRequest{
+func (c *Client) SendEmailNotification(ctx context.Context, accountID, emailID, subject, fromName string) error {
+	if strings.TrimSpace(subject) == "" {
+		subject = "(No subject)"
+	}
+	fromName = strings.TrimSpace(fromName)
+	if fromName == "" {
+		fromName = "New sender"
+	}
+	meta, err := json.Marshal(map[string]string{"email_id": emailID})
+	if err != nil {
+		return err
+	}
+	_, err = c.client.SendPushNotificationToUser(ctx, &gen.DySendPushNotificationToUserRequest{
 		UserId: accountID,
 		Notification: &gen.DyPushNotification{
 			Topic:    "email",
 			Title:    "New email",
 			Subtitle: subject,
-			Body:     "You received a new email.",
+			Body:     "From " + fromName,
+			Meta:     meta,
 		},
 	})
 	return err

@@ -20,6 +20,7 @@ func RegisterRoutes(r *gin.RouterGroup, emailSvc *service.EmailService) {
 		mailboxes.GET("", func(c *gin.Context) { listMailboxes(c, emailSvc) })
 		mailboxes.POST("", func(c *gin.Context) { createMailbox(c, emailSvc) })
 		mailboxes.GET("/:id/emails", func(c *gin.Context) { listMailboxEmails(c, emailSvc) })
+		mailboxes.GET("/:id/threads", func(c *gin.Context) { listThreads(c, emailSvc, c.Param("id")) })
 		mailboxes.GET("/:id/stats", func(c *gin.Context) { getMailboxStats(c, emailSvc) })
 		mailboxes.GET("/:id/quota", func(c *gin.Context) { getMailboxQuota(c, emailSvc) })
 	}
@@ -36,8 +37,24 @@ func RegisterRoutes(r *gin.RouterGroup, emailSvc *service.EmailService) {
 		emails.POST("/:id/unread", func(c *gin.Context) { markRead(c, emailSvc, false) })
 		emails.POST("/:id/star", func(c *gin.Context) { markStarred(c, emailSvc, true) })
 		emails.POST("/:id/unstar", func(c *gin.Context) { markStarred(c, emailSvc, false) })
+		emails.POST("/:id/move", func(c *gin.Context) { moveEmail(c, emailSvc) })
+		emails.POST("/:id/spam", func(c *gin.Context) { moveEmailTo(c, emailSvc, "spam") })
+		emails.POST("/:id/not-spam", func(c *gin.Context) { moveEmailTo(c, emailSvc, "inbox") })
 		emails.POST("/:id/labels/:labelID", func(c *gin.Context) { setEmailLabel(c, emailSvc, true) })
 		emails.DELETE("/:id/labels/:labelID", func(c *gin.Context) { setEmailLabel(c, emailSvc, false) })
+	}
+
+	threads := r.Group("/threads")
+	{
+		threads.GET("", func(c *gin.Context) { listThreads(c, emailSvc, "") })
+		threads.GET("/:id", func(c *gin.Context) { getThread(c, emailSvc) })
+	}
+
+	blocklist := r.Group("/blocklist")
+	{
+		blocklist.GET("", func(c *gin.Context) { listBlockRules(c, emailSvc) })
+		blocklist.POST("", func(c *gin.Context) { createBlockRule(c, emailSvc) })
+		blocklist.DELETE("/:id", func(c *gin.Context) { deleteBlockRule(c, emailSvc) })
 	}
 
 	labels := r.Group("/labels")
@@ -137,6 +154,33 @@ func listEmails(c *gin.Context, emailSvc *service.EmailService) {
 		return
 	}
 	c.Header("X-Total", strconv.FormatInt(total, 10))
+	c.JSON(http.StatusOK, items)
+}
+
+func listThreads(c *gin.Context, emailSvc *service.EmailService, mailboxID string) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	items, total, err := emailSvc.ListThreads(c.Request.Context(), uuid.MustParse(accountID), mailboxID, parseListInput(c))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.Header("X-Total", strconv.FormatInt(total, 10))
+	c.JSON(http.StatusOK, items)
+}
+
+func getThread(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	items, err := emailSvc.GetThread(c.Request.Context(), uuid.MustParse(accountID), c.Param("id"))
+	if err != nil {
+		renderServiceError(c, err)
+		return
+	}
 	c.JSON(http.StatusOK, items)
 }
 
@@ -296,6 +340,72 @@ func setEmailLabel(c *gin.Context, emailSvc *service.EmailService, assigned bool
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
+func moveEmail(c *gin.Context, emailSvc *service.EmailService) {
+	var input struct {
+		Folder string `json:"folder" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	moveEmailTo(c, emailSvc, input.Folder)
+}
+
+func moveEmailTo(c *gin.Context, emailSvc *service.EmailService, folder string) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	if err := emailSvc.MoveEmail(c.Request.Context(), uuid.MustParse(accountID), c.Param("id"), folder); err != nil {
+		renderServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func listBlockRules(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	items, err := emailSvc.ListBlockRules(c.Request.Context(), uuid.MustParse(accountID))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, items)
+}
+
+func createBlockRule(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	var input service.CreateBlockRuleInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	rule, err := emailSvc.CreateBlockRule(c.Request.Context(), uuid.MustParse(accountID), input)
+	if err != nil {
+		renderServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, rule)
+}
+
+func deleteBlockRule(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	if err := emailSvc.DeleteBlockRule(c.Request.Context(), uuid.MustParse(accountID), c.Param("id")); err != nil {
+		renderServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
 func listMailCredentials(c *gin.Context, emailSvc *service.EmailService) {
 	accountID, ok := identity.RequireAccountID(c)
 	if !ok {
@@ -348,7 +458,7 @@ func parseListInput(c *gin.Context) service.ListInput {
 	if parsed, err := strconv.Atoi(c.DefaultQuery("offset", "0")); err == nil && parsed >= 0 {
 		offset = parsed
 	}
-	input := service.ListInput{Take: take, Offset: offset, Query: c.Query("q"), DeliveryStatus: strings.TrimSpace(c.Query("delivery_status")), LabelID: strings.TrimSpace(c.Query("label_id"))}
+	input := service.ListInput{Take: take, Offset: offset, Query: c.Query("q"), DeliveryStatus: strings.TrimSpace(c.Query("delivery_status")), LabelID: strings.TrimSpace(c.Query("label_id")), Folder: strings.TrimSpace(c.Query("folder"))}
 	for key, target := range map[string]**bool{"is_read": &input.IsRead, "is_starred": &input.IsStarred, "is_draft": &input.IsDraft} {
 		if raw, exists := c.GetQuery(key); exists {
 			if value, err := strconv.ParseBool(raw); err == nil {

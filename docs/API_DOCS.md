@@ -111,6 +111,7 @@ needed:
 | `is_draft` | `true` or `false`. |
 | `delivery_status` | Exact delivery state such as `sent`, `failed`, `pending`, or `draft`. |
 | `label_id` | Only messages carrying this tag. |
+| `folder` | `inbox`, `sent`, `drafts`, `spam`, `trash`, or `archive`. |
 
 For filter counts and navigation badges, use `GET /api/emails/stats` or
 `GET /api/mailboxes/{mailbox-id}/stats`. Both return a total, unread, starred,
@@ -121,6 +122,18 @@ and draft count plus a count by delivery state.
 `GET /api/emails/{email-id}`
 
 Returns the email with its mailbox, recipients, and attachments.
+
+### Conversations
+
+`GET /api/threads?folder=inbox&offset=0&take=20` returns one summary per
+conversation. `GET /api/mailboxes/{mailbox-id}/threads` scopes the same list to
+a mailbox, and `GET /api/threads/{thread-id}` returns the complete timeline in
+chronological order.
+
+Every new message receives a `thread_id`. To reply, provide either the existing
+`thread_id` or `reply_to_id` (an email ID) to `POST /api/emails`; the latter
+automatically joins the parent message's conversation. The two fields are
+intentionally mutually exclusive.
 
 ### Send an email
 
@@ -188,6 +201,51 @@ silently omitted.
 `POST /api/emails/{email-id}/unread`
 
 Both return `{"ok":true}`.
+
+### Folders and spam
+
+New inbound mail arrives in `inbox`; sent messages and drafts are stored in
+`sent` and `drafts`. `DELETE /api/emails/{email-id}` moves a message to Trash.
+Move a message explicitly with `POST /api/emails/{email-id}/move`:
+
+```json
+{"folder":"archive"}
+```
+
+`POST /api/emails/{email-id}/spam` moves a message to Spam, while
+`POST /api/emails/{email-id}/not-spam` restores it to Inbox. Incoming mail that
+matches a block rule or the built-in conservative spam heuristic is retained in
+Spam for review.
+
+### Scheduled and HTML email
+
+`content_type` accepts `text/plain` (default) or `text/html` when sending.
+Set a future RFC3339 `scheduled_at` in `POST /api/emails` to queue a message;
+the delivery worker sends it at or after that timestamp.
+
+## Blocklist
+
+`GET /api/blocklist` lists rules, `POST /api/blocklist` creates one, and
+`DELETE /api/blocklist/{id}` removes it. Rules can target a whole workspace or
+one mailbox and match either an exact address or a domain:
+
+```json
+{"scope":"workspace","workspace_id":"01J...","pattern":"spam.example"}
+```
+
+```json
+{"scope":"mailbox","mailbox_id":"01J...","pattern":"sender@example.com"}
+```
+
+## Real-time updates
+
+When `websocket.target` is configured, ElecPostal publishes `mail.created`
+packets through the DysonNetwork WebSocket gateway under the
+`dev.solsynth.solarwatt` namespace. The packet data is JSON-encoded email data.
+
+When `ring.target` is configured, each new Inbox email also sends a standard
+account push notification with the email ID in its metadata. Spam messages do
+not trigger user notifications.
 
 ### Star and unstar
 

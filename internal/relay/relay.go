@@ -19,6 +19,8 @@ type Message struct {
 	Bcc           []string
 	Subject       string
 	Body          string
+	ContentType   string
+	ThreadID      string
 	AttachmentIDs []string
 }
 

@@ -19,6 +19,7 @@ type Config struct {
 	Workspace  WorkspaceConfig  `mapstructure:"workspace"`
 	Mail       MailConfig       `mapstructure:"mail"`
 	Ring       RingConfig       `mapstructure:"ring"`
+	WebSocket  WebSocketConfig  `mapstructure:"websocket"`
 	Sentry     SentryConfig     `mapstructure:"sentry"`
 }
 
@@ -100,9 +101,17 @@ type ListenerConfig struct {
 	CertFile      string `mapstructure:"certFile"`
 	KeyFile       string `mapstructure:"keyFile"`
 	TLSSkipVerify bool   `mapstructure:"tlsSkipVerify"`
+	MaxMessageBytes int64 `mapstructure:"maxMessageBytes"`
+	MaxRecipients   int   `mapstructure:"maxRecipients"`
 }
 
 type RingConfig struct {
+	Target        string `mapstructure:"target"`
+	UseTLS        bool   `mapstructure:"useTLS"`
+	TLSSkipVerify bool   `mapstructure:"tlsSkipVerify"`
+}
+
+type WebSocketConfig struct {
 	Target        string `mapstructure:"target"`
 	UseTLS        bool   `mapstructure:"useTLS"`
 	TLSSkipVerify bool   `mapstructure:"tlsSkipVerify"`
@@ -142,6 +151,8 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("mail.relay.tlsMode", "starttls")
 	v.SetDefault("mail.smtp.port", "587")
 	v.SetDefault("mail.smtp.tlsMode", "starttls")
+	v.SetDefault("mail.smtp.maxMessageBytes", 25*1024*1024)
+	v.SetDefault("mail.smtp.maxRecipients", 100)
 	v.SetDefault("mail.imap.port", "143")
 	v.SetDefault("mail.imap.tlsMode", "starttls")
 	v.SetDefault("mail.pop3.port", "110")
@@ -149,6 +160,9 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("ring.target", "")
 	v.SetDefault("ring.useTLS", false)
 	v.SetDefault("ring.tlsSkipVerify", false)
+	v.SetDefault("websocket.target", "")
+	v.SetDefault("websocket.useTLS", false)
+	v.SetDefault("websocket.tlsSkipVerify", false)
 	v.SetDefault("sentry.dsn", "")
 	v.SetDefault("sentry.tracesSampleRate", 0.01)
 	v.SetDefault("sentry.environment", "")
@@ -185,6 +199,7 @@ func applyEnvOverrides(v *viper.Viper) {
 	setEnvIfPresent(v, "mail.relay.region", "MAIL_RELAY_REGION")
 	setEnvIfPresent(v, "mail.relay.inboundHost", "MAIL_RELAY_INBOUND_HOST")
 	setEnvIfPresent(v, "ring.target", "RING_TARGET")
+	setEnvIfPresent(v, "websocket.target", "WEBSOCKET_TARGET")
 }
 
 func setEnvIfPresent(v *viper.Viper, key, env string) {

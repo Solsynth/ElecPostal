@@ -17,6 +17,7 @@ import (
 	"src.solsynth.dev/sosys/elecpostal/internal/database"
 	"src.solsynth.dev/sosys/elecpostal/internal/filesystem"
 	"src.solsynth.dev/sosys/elecpostal/internal/logging"
+	"src.solsynth.dev/sosys/elecpostal/internal/realtime"
 	"src.solsynth.dev/sosys/elecpostal/internal/relay"
 	"src.solsynth.dev/sosys/elecpostal/internal/ring"
 	"src.solsynth.dev/sosys/elecpostal/internal/server"
@@ -55,6 +56,13 @@ func New(cfg *config.Config) (*App, error) {
 	}
 
 	emailSvc := service.NewEmailService(db, notifier)
+	if cfg.WebSocket.Target != "" {
+		publisher, err := realtime.NewClient(cfg.WebSocket.Target, cfg.WebSocket.UseTLS, cfg.WebSocket.TLSSkipVerify)
+		if err != nil {
+			return nil, err
+		}
+		emailSvc.SetRealtimePublisher(publisher)
+	}
 	emailSvc.SetDomain(cfg.Mail.Domain)
 	switch cfg.Mail.Relay.Adapter {
 	case "direct-smtp":
@@ -148,6 +156,7 @@ func (a *App) Start(ctx context.Context) error {
 		}
 	}()
 	go a.purgeArchivedEmails(ctx)
+	go a.deliverScheduledEmails(ctx)
 	go func() {
 		if err := a.httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logging.Log.Error().Err(err).Msg("http server stopped")
@@ -159,6 +168,27 @@ func (a *App) Start(ctx context.Context) error {
 		Str("grpc", a.cfg.GRPC.Port).
 		Msg("elecpostal started")
 	return nil
+}
+
+func (a *App) deliverScheduledEmails(ctx context.Context) {
+	deliver := func() {
+		if count, err := a.emailSvc.DeliverScheduledEmails(ctx); err != nil {
+			logging.Log.Error().Err(err).Msg("deliver scheduled emails")
+		} else if count > 0 {
+			logging.Log.Info().Int64("count", count).Msg("delivered scheduled emails")
+		}
+	}
+	deliver()
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			deliver()
+		}
+	}
 }
 
 func (a *App) purgeArchivedEmails(ctx context.Context) {
