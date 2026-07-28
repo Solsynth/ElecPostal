@@ -38,3 +38,7 @@ func (DisabledAdapter) Close() error                        { return nil }
 // ErrAttachmentSourceRequired prevents a provider adapter from silently
 // dropping attachment IDs when it lacks a configured DysonFS byte source.
 var ErrAttachmentSourceRequired = fmt.Errorf("relay attachment source is required")
+
+// ErrUnsupportedAdapter is returned when a configured adapter has not been
+// registered with the process.
+var ErrUnsupportedAdapter = fmt.Errorf("unsupported mail relay adapter")

@@ -17,6 +17,7 @@ import (
 	"src.solsynth.dev/sosys/elecpostal/internal/database"
 	"src.solsynth.dev/sosys/elecpostal/internal/filesystem"
 	"src.solsynth.dev/sosys/elecpostal/internal/logging"
+	"src.solsynth.dev/sosys/elecpostal/internal/relay"
 	"src.solsynth.dev/sosys/elecpostal/internal/server"
 	"src.solsynth.dev/sosys/elecpostal/internal/service"
 	"src.solsynth.dev/sosys/elecpostal/internal/solar"
@@ -49,6 +50,17 @@ func New(cfg *config.Config) (*App, error) {
 	}
 
 	emailSvc := service.NewEmailService(db, solarClient)
+	if cfg.Mail.Relay.Adapter == "direct-smtp" {
+		directRelay, err := relay.NewDirectSMTPAdapter(relay.DirectSMTPConfig{
+			Hostname:      cfg.Mail.Relay.Host,
+			RequireTLS:    cfg.Mail.Relay.TLSMode == "required",
+			TLSSkipVerify: cfg.Mail.Relay.TLSSkipVerify,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("configure direct SMTP relay: %w", err)
+		}
+		emailSvc.SetRelay(directRelay)
+	}
 	if cfg.FileSystem.Target != "" {
 		fileClient, err := filesystem.NewClient(cfg.FileSystem.Target, cfg.FileSystem.UseTLS, cfg.FileSystem.TLSSkipVerify)
 		if err != nil {

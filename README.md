@@ -45,3 +45,16 @@ persists the email.
 Create scoped, revocable app passwords at `POST /api/credentials` with a
 label and one or more protocols (`smtp`, `imap`, `pop3`). The returned `secret`
 is shown once and is only accepted by mail protocol listeners—not by HTTP APIs.
+
+## Outbound delivery
+
+Set `mail.relay.adapter = "direct-smtp"` to deliver directly to recipient MX
+records without a relay. `mail.relay.host` must be this server's public mail
+hostname for EHLO. Direct delivery uses TCP port 25 and opportunistically uses
+STARTTLS; set `mail.relay.tlsMode = "required"` to reject MX servers that do
+not support STARTTLS.
+
+Other delivery providers, including SES, are implemented as adapters behind the
+same outbound-delivery contract. Attachment IDs require a DysonFS byte source;
+until that is configured, enabled delivery rejects messages with attachments
+rather than dropping them.

@@ -105,6 +105,15 @@ Soft-deletes the email and returns:
 {"ok":true}
 ```
 
+## Delivery behavior
+
+When the service is configured with the `direct-smtp` outbound adapter,
+non-draft messages are delivered directly to recipient MX records. Delivery
+errors are returned by `POST /api/emails`; a message is not persisted when
+direct delivery fails. Messages with `attachment_ids` are rejected while no
+DysonFS attachment-byte source is configured, preventing attachments from being
+silently omitted.
+
 ### Mark read or unread
 
 `POST /api/emails/{email-id}/read`

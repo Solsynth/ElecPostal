@@ -26,12 +26,12 @@ useTLS = false
 tlsSkipVerify = false
 
 [mail.relay]
-adapter = "ses-smtp"       # empty disables relay; adapters can be added without changing email logic
-host = "email-smtp.us-east-1.amazonaws.com"
+adapter = ""                # direct-smtp sends to MX directly; SES adapter will use this same boundary
+host = "mail.example.com"   # required by direct-smtp for HELO/EHLO
 port = "587"
 username = ""              # SES SMTP username; use MAIL_RELAY_USERNAME in production
 password = ""              # SES SMTP password; use MAIL_RELAY_PASSWORD in production
-tlsMode = "starttls"       # starttls, implicit, disabled
+tlsMode = "starttls"       # direct-smtp: starttls or required; listener modes: starttls, implicit, disabled
 tlsHost = ""               # optional TLS server-name override
 tlsSkipVerify = false
 

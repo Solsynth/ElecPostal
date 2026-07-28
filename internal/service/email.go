@@ -14,6 +14,7 @@ import (
 	"src.solsynth.dev/sosys/elecpostal/internal/database"
 	"src.solsynth.dev/sosys/elecpostal/internal/filesystem"
 	"src.solsynth.dev/sosys/elecpostal/internal/logging"
+	"src.solsynth.dev/sosys/elecpostal/internal/relay"
 	"src.solsynth.dev/sosys/elecpostal/internal/solar"
 )
 
@@ -84,6 +85,13 @@ type EmailService struct {
 	db    *database.DB
 	solar *solar.Client
 	files filesystem.Uploader
+	relay relay.Adapter
+}
+
+// SetRelay configures outbound delivery. A nil adapter retains the existing
+// persistence-only behavior for deployments without delivery enabled.
+func (s *EmailService) SetRelay(adapter relay.Adapter) {
+	s.relay = adapter
 }
 
 // NewEmailService creates a new EmailService.
@@ -100,6 +108,11 @@ func (s *EmailService) SetAttachmentUploader(uploader filesystem.Uploader) {
 
 // Close releases resources held by optional downstream clients.
 func (s *EmailService) Close() error {
+	if s.relay != nil {
+		if err := s.relay.Close(); err != nil {
+			return err
+		}
+	}
 	if s.files != nil {
 		return s.files.Close()
 	}
@@ -215,6 +228,11 @@ func (s *EmailService) SendEmail(ctx context.Context, accountID uuid.UUID, input
 		IsDraft:     input.IsDraft,
 	}
 	if !input.IsDraft {
+		if s.relay != nil {
+			if err := s.relay.Send(ctx, outgoingRelayMessage(mailbox, input)); err != nil {
+				return nil, fmt.Errorf("deliver email: %w", err)
+			}
+		}
 		now := time.Now()
 		email.SentAt = &now
 	}
@@ -261,6 +279,26 @@ func (s *EmailService) SendEmail(ctx context.Context, accountID uuid.UUID, input
 	}
 
 	return &email, nil
+}
+
+func outgoingRelayMessage(mailbox database.Mailbox, input SendEmailInput) relay.Message {
+	message := relay.Message{
+		FromAddress:   mailbox.Address,
+		FromName:      mailbox.Name,
+		Subject:       input.Subject,
+		Body:          input.Body,
+		AttachmentIDs: input.AttachmentIDs,
+	}
+	for _, recipient := range input.To {
+		message.To = append(message.To, recipient.Address)
+	}
+	for _, recipient := range input.Cc {
+		message.Cc = append(message.Cc, recipient.Address)
+	}
+	for _, recipient := range input.Bcc {
+		message.Bcc = append(message.Bcc, recipient.Address)
+	}
+	return message
 }
 
 // ReceiveEmail stores a message received from another mail service. Raw
