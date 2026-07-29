@@ -114,9 +114,12 @@ type ListInput struct {
 	MailboxID      string
 	WorkspaceID    string
 	Query          string
+	From           string
+	To             string
 	IsRead         *bool
 	IsStarred      *bool
 	IsDraft        *bool
+	HasAttachments *bool
 	DeliveryStatus string
 	LabelID        string
 	Folder         string
@@ -460,6 +463,14 @@ func (s *EmailService) emailListQuery(ctx context.Context, accountID uuid.UUID, 
 		like := "%" + strings.ToLower(term) + "%"
 		query = query.Where("(LOWER(emails.subject) LIKE ? OR LOWER(emails.body) LIKE ? OR LOWER(emails.from_address) LIKE ? OR LOWER(emails.from_name) LIKE ? OR EXISTS (SELECT 1 FROM recipients WHERE recipients.email_id = emails.id AND (LOWER(recipients.address) LIKE ? OR LOWER(recipients.name) LIKE ?)))", like, like, like, like, like, like)
 	}
+	if sender := strings.TrimSpace(input.From); sender != "" {
+		like := "%" + strings.ToLower(sender) + "%"
+		query = query.Where("LOWER(emails.from_address) LIKE ? OR LOWER(emails.from_name) LIKE ?", like, like)
+	}
+	if recipient := strings.TrimSpace(input.To); recipient != "" {
+		like := "%" + strings.ToLower(recipient) + "%"
+		query = query.Where("EXISTS (SELECT 1 FROM recipients WHERE recipients.email_id = emails.id AND (LOWER(recipients.address) LIKE ? OR LOWER(recipients.name) LIKE ?))", like, like)
+	}
 	if input.IsRead != nil {
 		query = query.Where("emails.is_read = ?", *input.IsRead)
 	}
@@ -468,6 +479,13 @@ func (s *EmailService) emailListQuery(ctx context.Context, accountID uuid.UUID, 
 	}
 	if input.IsDraft != nil {
 		query = query.Where("emails.is_draft = ?", *input.IsDraft)
+	}
+	if input.HasAttachments != nil {
+		if *input.HasAttachments {
+			query = query.Where("EXISTS (SELECT 1 FROM attachments WHERE attachments.email_id = emails.id)")
+		} else {
+			query = query.Where("NOT EXISTS (SELECT 1 FROM attachments WHERE attachments.email_id = emails.id)")
+		}
 	}
 	if status := strings.TrimSpace(input.DeliveryStatus); status != "" {
 		query = query.Where("emails.delivery_status = ?", status)

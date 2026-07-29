@@ -108,12 +108,17 @@ needed:
 | `q` | Case-insensitive match against subject, body, sender, and recipients. |
 | `is_read` | `true` or `false`. |
 | `is_starred` | `true` or `false`. |
+| `is_flagged` | Alias for `is_starred`, for clients using mailbox flag terminology. |
 | `is_draft` | `true` or `false`. |
 | `delivery_status` | Exact delivery state such as `sent`, `failed`, `pending`, or `draft`. |
+| `status` | Alias for `delivery_status`. |
 | `label_id` | Only messages carrying this tag. |
 | `folder` | `inbox`, `sent`, `drafts`, `spam`, `trash`, or `archive`. |
 | `mailbox_id` | Only messages belonging to this mailbox. |
 | `workspace_id` | Only messages in this workspace. The caller must be an active workspace member. |
+| `from` | Case-insensitive match against the sender name or address. |
+| `to` | Case-insensitive match against a recipient name or address. |
+| `has_attachments` | `true` for messages with attachments, `false` for messages without. |
 
 For filter counts and navigation badges, use `GET /api/emails/stats` or
 `GET /api/mailboxes/{mailbox-id}/stats`. Both return a total, unread, starred,
