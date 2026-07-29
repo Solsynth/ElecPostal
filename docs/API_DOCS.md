@@ -93,7 +93,7 @@ Once this allocation is exceeded, the oldest messages are archived and given a
 
 ### List emails
 
-`GET /api/emails?offset=0&take=20`
+`GET /api/emails?offset=0&take=20&mailbox_id={mailbox-id}&workspace_id={workspace-id}`
 
 `GET /api/mailboxes/{mailbox-id}/emails?offset=0&take=20`
 
@@ -112,6 +112,8 @@ needed:
 | `delivery_status` | Exact delivery state such as `sent`, `failed`, `pending`, or `draft`. |
 | `label_id` | Only messages carrying this tag. |
 | `folder` | `inbox`, `sent`, `drafts`, `spam`, `trash`, or `archive`. |
+| `mailbox_id` | Only messages belonging to this mailbox. |
+| `workspace_id` | Only messages in this workspace. The caller must be an active workspace member. |
 
 For filter counts and navigation badges, use `GET /api/emails/stats` or
 `GET /api/mailboxes/{mailbox-id}/stats`. Both return a total, unread, starred,

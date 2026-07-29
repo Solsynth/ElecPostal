@@ -458,7 +458,7 @@ func parseListInput(c *gin.Context) service.ListInput {
 	if parsed, err := strconv.Atoi(c.DefaultQuery("offset", "0")); err == nil && parsed >= 0 {
 		offset = parsed
 	}
-	input := service.ListInput{Take: take, Offset: offset, Query: c.Query("q"), DeliveryStatus: strings.TrimSpace(c.Query("delivery_status")), LabelID: strings.TrimSpace(c.Query("label_id")), Folder: strings.TrimSpace(c.Query("folder"))}
+	input := service.ListInput{Take: take, Offset: offset, MailboxID: strings.TrimSpace(c.Query("mailbox_id")), WorkspaceID: strings.TrimSpace(c.Query("workspace_id")), Query: c.Query("q"), DeliveryStatus: strings.TrimSpace(c.Query("delivery_status")), LabelID: strings.TrimSpace(c.Query("label_id")), Folder: strings.TrimSpace(c.Query("folder"))}
 	for key, target := range map[string]**bool{"is_read": &input.IsRead, "is_starred": &input.IsStarred, "is_draft": &input.IsDraft} {
 		if raw, exists := c.GetQuery(key); exists {
 			if value, err := strconv.ParseBool(raw); err == nil {

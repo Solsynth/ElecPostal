@@ -111,6 +111,8 @@ type ReceiveEmailInput struct {
 type ListInput struct {
 	Offset         int
 	Take           int
+	MailboxID      string
+	WorkspaceID    string
 	Query          string
 	IsRead         *bool
 	IsStarred      *bool
@@ -376,7 +378,8 @@ func (s *EmailService) CreateMailbox(ctx context.Context, accountID uuid.UUID, w
 	return &mailbox, nil
 }
 
-// ListEmails returns emails for an account with optional mailbox filter.
+// ListEmails returns emails for an account with optional mailbox and workspace
+// filters. Workspace filters require active membership in that workspace.
 func (s *EmailService) ListEmails(ctx context.Context, accountID uuid.UUID, mailboxID string, input ListInput) ([]database.Email, int64, error) {
 	if input.Take <= 0 {
 		input.Take = 20
@@ -388,9 +391,21 @@ func (s *EmailService) ListEmails(ctx context.Context, accountID uuid.UUID, mail
 		input.Offset = 0
 	}
 
+	if workspaceID := strings.TrimSpace(input.WorkspaceID); workspaceID != "" {
+		if err := s.authorizeWorkspaceMember(ctx, workspaceID, accountID); err != nil {
+			return nil, 0, err
+		}
+	}
+
 	query := s.emailListQuery(ctx, accountID, input)
 	if strings.TrimSpace(mailboxID) != "" {
 		query = query.Where("mailbox_id = ?", mailboxID)
+	} else if filterMailboxID := strings.TrimSpace(input.MailboxID); filterMailboxID != "" {
+		query = query.Where("emails.mailbox_id = ?", filterMailboxID)
+	}
+	if workspaceID := strings.TrimSpace(input.WorkspaceID); workspaceID != "" {
+		query = query.Joins("JOIN mailboxes ON mailboxes.id = emails.mailbox_id AND mailboxes.deleted_at IS NULL").
+			Where("mailboxes.workspace_id = ?", workspaceID)
 	}
 
 	var total int64
