@@ -163,6 +163,12 @@ default when it is omitted.
 
 Returns `201 Created` with the stored email.
 
+Outbound send limits are enforced per mailbox and per workspace for daily and
+monthly calendar periods. Exceeding a limit returns `429 Too Many Requests`.
+The plan-specific values are configured by the service operator under
+`mail.sendLimits`; drafts do not consume quota and scheduled mail consumes it
+when delivered.
+
 Non-draft emails include delivery metadata: `delivery_status` (`pending`,
 `sent`, `failed`, or `not_configured`), `delivery_attempts`, the last attempt
 time, an optional provider message ID, and an error when delivery failed.

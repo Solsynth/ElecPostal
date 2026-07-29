@@ -38,6 +38,7 @@ func (d *DB) AutoMigrate() error {
 		&MailProtocolCredential{},
 		&EmailLabel{},
 		&EmailLabelMapping{},
+		&MailSendUsage{},
 		&MailBlockRule{},
 	); err != nil {
 		return err

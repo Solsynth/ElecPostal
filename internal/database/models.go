@@ -160,6 +160,25 @@ type EmailLabelMapping struct {
 	LabelID string `gorm:"primaryKey;size:36" json:"label_id"`
 }
 
+// MailSendUsage holds an atomic counter for one mailbox or workspace and one
+// calendar period. It is used to enforce outbound send limits.
+type MailSendUsage struct {
+	ID          string    `gorm:"primaryKey;size:36" json:"id"`
+	WorkspaceID string    `gorm:"uniqueIndex:idx_mail_send_usage_scope_period,priority:1;size:36" json:"workspace_id"`
+	Scope       string    `gorm:"uniqueIndex:idx_mail_send_usage_scope_period,priority:2;size:64" json:"scope"`
+	PeriodStart time.Time `gorm:"uniqueIndex:idx_mail_send_usage_scope_period,priority:3" json:"period_start"`
+	SentCount   int64     `json:"sent_count"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+func (u *MailSendUsage) BeforeCreate(tx *gorm.DB) error {
+	if u.ID == "" {
+		u.ID = NewID()
+	}
+	return nil
+}
+
 // MailBlockRule prevents a sender or domain from reaching a mailbox or every
 // mailbox in a workspace. Matching mail is retained in Spam for review.
 type MailBlockRule struct {

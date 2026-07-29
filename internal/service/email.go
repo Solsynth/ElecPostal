@@ -24,6 +24,7 @@ var (
 	ErrForbidden            = errors.New("forbidden")
 	ErrWorkspaceUnavailable = errors.New("workspace quota service is not configured")
 	ErrMailboxLimitExceeded = errors.New("workspace mailbox limit exceeded")
+	ErrSendLimitExceeded    = errors.New("outbound email send limit exceeded")
 )
 
 var reservedMailboxLocalParts = map[string]struct{}{
@@ -34,6 +35,7 @@ var reservedMailboxLocalParts = map[string]struct{}{
 const (
 	mailStorageFractionDivisor int64 = 10
 	archiveRetention                 = 30 * 24 * time.Hour
+	sendUsageRetention               = 62 * 24 * time.Hour
 )
 
 // RecipientInput is a recipient for a new email.
@@ -202,7 +204,7 @@ func (s *EmailService) ResolveLocalMailbox(ctx context.Context, address string) 
 	var mailbox database.Mailbox
 	query := s.db.WithContext(ctx)
 	if localPart == "postmaster" {
-		query = query.Where("is_default = ?", true).Order("created_at ASC")
+		query = query.Where("is_default = ? AND LOWER(address) LIKE ?", true, "%@"+s.domain).Order("created_at ASC")
 	} else {
 		query = query.Where("LOWER(address) = ?", address)
 	}
@@ -689,6 +691,13 @@ func (s *EmailService) SendEmail(ctx context.Context, accountID uuid.UUID, input
 	if err != nil {
 		return nil, err
 	}
+	var sendLimits workspace.SendLimits
+	if !input.IsDraft && input.ScheduledAt == nil {
+		sendLimits, err = s.workspaceSendLimits(ctx, mailbox.WorkspaceID)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	fromAddress := s.normalizeFromAddress(mailbox.Address)
 	email := database.Email{
@@ -723,6 +732,11 @@ func (s *EmailService) SendEmail(ctx context.Context, accountID uuid.UUID, input
 	}
 
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if !input.IsDraft && input.ScheduledAt == nil {
+			if err := reserveOutboundSend(tx, mailbox, sendLimits, time.Now()); err != nil {
+				return err
+			}
+		}
 		if err := tx.Create(&email).Error; err != nil {
 			return err
 		}
@@ -1169,12 +1183,36 @@ func (s *EmailService) DeliverScheduledEmails(ctx context.Context) (int64, error
 	var delivered int64
 	for i := range emails {
 		email := &emails[i]
-		now := time.Now()
-		claimed := s.db.WithContext(ctx).Model(&database.Email{}).Where("id = ? AND delivery_status = ?", email.ID, "scheduled").Updates(map[string]any{"scheduled_at": nil, "delivery_status": "pending", "last_delivery_attempt_at": now, "delivery_attempts": email.DeliveryAttempts + 1})
-		if claimed.Error != nil {
-			return delivered, claimed.Error
+		if email.Mailbox == nil {
+			logging.Log.Warn().Str("email_id", email.ID).Msg("scheduled email mailbox no longer exists")
+			continue
 		}
-		if claimed.RowsAffected == 0 {
+		now := time.Now()
+		limits, err := s.workspaceSendLimits(ctx, email.Mailbox.WorkspaceID)
+		if err != nil {
+			logging.Log.Warn().Err(err).Str("email_id", email.ID).Msg("load scheduled email send limits")
+			continue
+		}
+		claimed := false
+		err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			result := tx.Model(&database.Email{}).Where("id = ? AND delivery_status = ?", email.ID, "scheduled").Updates(map[string]any{"scheduled_at": nil, "delivery_status": "pending", "last_delivery_attempt_at": now, "delivery_attempts": email.DeliveryAttempts + 1})
+			if result.Error != nil {
+				return result.Error
+			}
+			claimed = result.RowsAffected > 0
+			if !claimed {
+				return nil
+			}
+			if err := reserveOutboundSend(tx, *email.Mailbox, limits, now); err != nil {
+				return err
+			}
+			return nil
+		})
+		if err != nil {
+			logging.Log.Warn().Err(err).Str("email_id", email.ID).Msg("scheduled email is over its send limit")
+			continue
+		}
+		if !claimed {
 			continue
 		}
 		email.ScheduledAt = nil
@@ -1269,6 +1307,14 @@ func (s *EmailService) PurgeArchivedEmails(ctx context.Context) (int64, error) {
 	return purged, err
 }
 
+// PurgeExpiredSendUsage removes old daily and monthly counters. Keeping a
+// little over two months supports a full calendar month while bounding table
+// growth.
+func (s *EmailService) PurgeExpiredSendUsage(ctx context.Context) (int64, error) {
+	result := s.db.WithContext(ctx).Where("period_start < ?", time.Now().UTC().Add(-sendUsageRetention)).Delete(&database.MailSendUsage{})
+	return result.RowsAffected, result.Error
+}
+
 func (s *EmailService) authorizeWorkspaceMember(ctx context.Context, workspaceID string, accountID uuid.UUID) error {
 	if s.workspace == nil {
 		return ErrWorkspaceUnavailable
@@ -1339,6 +1385,58 @@ func (s *EmailService) workspaceMailboxLimit(ctx context.Context, workspaceID st
 		return 0, fmt.Errorf("workspace mail quota is zero")
 	}
 	return limit, nil
+}
+
+func (s *EmailService) workspaceSendLimits(ctx context.Context, workspaceID string) (workspace.SendLimits, error) {
+	if s.workspace == nil {
+		return workspace.SendLimits{}, ErrWorkspaceUnavailable
+	}
+	limits, err := s.workspace.SendLimits(ctx, workspaceID)
+	if err != nil {
+		return workspace.SendLimits{}, fmt.Errorf("get workspace send limits: %w", err)
+	}
+	return limits, nil
+}
+
+func reserveOutboundSend(tx *gorm.DB, mailbox database.Mailbox, limits workspace.SendLimits, now time.Time) error {
+	dayStart := now.UTC().Truncate(24 * time.Hour)
+	monthStart := time.Date(now.UTC().Year(), now.UTC().Month(), 1, 0, 0, 0, 0, time.UTC)
+	for _, reservation := range []struct {
+		scope       string
+		periodStart time.Time
+		limit       int64
+	}{
+		{"workspace:day", dayStart, limits.WorkspaceDaily},
+		{"workspace:month", monthStart, limits.WorkspaceMonthly},
+		{"mailbox:" + mailbox.ID + ":day", dayStart, limits.MailboxDaily},
+		{"mailbox:" + mailbox.ID + ":month", monthStart, limits.MailboxMonthly},
+	} {
+		if err := reserveSendUsage(tx, mailbox.WorkspaceID, reservation.scope, reservation.periodStart, reservation.limit, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func reserveSendUsage(tx *gorm.DB, workspaceID, scope string, periodStart time.Time, limit int64, now time.Time) error {
+	if limit <= 0 {
+		return nil
+	}
+	var result database.MailSendUsage
+	query := tx.Raw(`
+		INSERT INTO mail_send_usages (id, workspace_id, scope, period_start, sent_count, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 1, ?, ?)
+		ON CONFLICT (workspace_id, scope, period_start) DO UPDATE
+		SET sent_count = mail_send_usages.sent_count + 1, updated_at = EXCLUDED.updated_at
+		WHERE mail_send_usages.sent_count < ?
+		RETURNING id, sent_count`, database.NewID(), workspaceID, scope, periodStart, now, now, limit).Scan(&result)
+	if query.Error != nil {
+		return query.Error
+	}
+	if query.RowsAffected == 0 {
+		return fmt.Errorf("%w: %s limit=%d", ErrSendLimitExceeded, scope, limit)
+	}
+	return nil
 }
 
 func outgoingRawSize(email database.Email, input SendEmailInput) int64 {

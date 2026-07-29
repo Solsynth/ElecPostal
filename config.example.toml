@@ -15,6 +15,14 @@ dsn = "host=postgres port=5432 user=dyson password=dyson dbname=elec_postal sslm
 [redis]
 addr = ""
 
+[nats]
+# Set target in production to enable durable, horizontally scalable SMTP ingestion.
+target = "nats://127.0.0.1:4222"
+stream = "ELECPOSTAL_INBOUND"
+subject = "elecpostal.smtp.inbound"
+consumer = "elecpostal-smtp-workers"
+workers = 8
+
 [auth]
 target = ""              # Solar auth gRPC target (host:port); leave empty to disable auth
 useTLS = false
@@ -29,6 +37,24 @@ tlsSkipVerify = false
 target = ""              # Workspace gRPC target; required for workspace mailbox creation and email quota enforcement
 useTLS = false
 tlsSkipVerify = false
+
+[mail.sendLimits.free]
+mailboxDaily = 100
+mailboxMonthly = 2000
+workspaceDaily = 100
+workspaceMonthly = 2000
+
+[mail.sendLimits.pro]
+mailboxDaily = 1000
+mailboxMonthly = 20000
+workspaceDaily = 3000
+workspaceMonthly = 60000
+
+[mail.sendLimits.enterprise]
+mailboxDaily = 5000
+mailboxMonthly = 100000
+workspaceDaily = 25000
+workspaceMonthly = 500000
 
 [mail.relay]
 adapter = ""                # direct-smtp sends to MX directly; ses uses the AWS SDK

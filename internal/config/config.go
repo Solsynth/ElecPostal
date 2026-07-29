@@ -14,6 +14,7 @@ type Config struct {
 	GRPC       GRPCConfig       `mapstructure:"grpc"`
 	Database   DatabaseConfig   `mapstructure:"database"`
 	Redis      RedisConfig      `mapstructure:"redis"`
+	NATS       NATSConfig       `mapstructure:"nats"`
 	Auth       AuthConfig       `mapstructure:"auth"`
 	FileSystem FileSystemConfig `mapstructure:"filesystem"`
 	Workspace  WorkspaceConfig  `mapstructure:"workspace"`
@@ -46,6 +47,16 @@ type RedisConfig struct {
 	Addr string `mapstructure:"addr"`
 }
 
+// NATSConfig configures durable JetStream ingestion for inbound SMTP.
+// An empty target retains synchronous delivery for development only.
+type NATSConfig struct {
+	Target   string `mapstructure:"target"`
+	Stream   string `mapstructure:"stream"`
+	Subject  string `mapstructure:"subject"`
+	Consumer string `mapstructure:"consumer"`
+	Workers  int    `mapstructure:"workers"`
+}
+
 type AuthConfig struct {
 	Target        string `mapstructure:"target"`
 	UseTLS        bool   `mapstructure:"useTLS"`
@@ -73,11 +84,27 @@ type WorkspaceConfig struct {
 // outbound relay. Protocol ports default to the registered standards; TLS mode
 // is explicit so deployments can use STARTTLS or implicit TLS where required.
 type MailConfig struct {
-	Domain string         `mapstructure:"domain"`
-	Relay  RelayConfig    `mapstructure:"relay"`
-	SMTP   ListenerConfig `mapstructure:"smtp"`
-	IMAP   ListenerConfig `mapstructure:"imap"`
-	POP3   ListenerConfig `mapstructure:"pop3"`
+	Domain     string               `mapstructure:"domain"`
+	Relay      RelayConfig          `mapstructure:"relay"`
+	SMTP       ListenerConfig       `mapstructure:"smtp"`
+	IMAP       ListenerConfig       `mapstructure:"imap"`
+	POP3       ListenerConfig       `mapstructure:"pop3"`
+	SendLimits MailSendLimitsConfig `mapstructure:"sendLimits"`
+}
+
+// MailSendLimitConfig configures outgoing message limits for one plan.
+// A value of zero disables the corresponding limit.
+type MailSendLimitConfig struct {
+	MailboxDaily     int64 `mapstructure:"mailboxDaily"`
+	MailboxMonthly   int64 `mapstructure:"mailboxMonthly"`
+	WorkspaceDaily   int64 `mapstructure:"workspaceDaily"`
+	WorkspaceMonthly int64 `mapstructure:"workspaceMonthly"`
+}
+
+type MailSendLimitsConfig struct {
+	Free       MailSendLimitConfig `mapstructure:"free"`
+	Pro        MailSendLimitConfig `mapstructure:"pro"`
+	Enterprise MailSendLimitConfig `mapstructure:"enterprise"`
 }
 
 type RelayConfig struct {
@@ -94,15 +121,15 @@ type RelayConfig struct {
 }
 
 type ListenerConfig struct {
-	Enabled       bool   `mapstructure:"enabled"`
-	Host          string `mapstructure:"host"`
-	Port          string `mapstructure:"port"`
-	TLSMode       string `mapstructure:"tlsMode"` // starttls, implicit, disabled
-	CertFile      string `mapstructure:"certFile"`
-	KeyFile       string `mapstructure:"keyFile"`
-	TLSSkipVerify bool   `mapstructure:"tlsSkipVerify"`
-	MaxMessageBytes int64 `mapstructure:"maxMessageBytes"`
-	MaxRecipients   int   `mapstructure:"maxRecipients"`
+	Enabled         bool   `mapstructure:"enabled"`
+	Host            string `mapstructure:"host"`
+	Port            string `mapstructure:"port"`
+	TLSMode         string `mapstructure:"tlsMode"` // starttls, implicit, disabled
+	CertFile        string `mapstructure:"certFile"`
+	KeyFile         string `mapstructure:"keyFile"`
+	TLSSkipVerify   bool   `mapstructure:"tlsSkipVerify"`
+	MaxMessageBytes int64  `mapstructure:"maxMessageBytes"`
+	MaxRecipients   int    `mapstructure:"maxRecipients"`
 }
 
 type RingConfig struct {
@@ -136,6 +163,11 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("grpc.keyFile", "")
 	v.SetDefault("database.dsn", "")
 	v.SetDefault("redis.addr", "")
+	v.SetDefault("nats.target", "")
+	v.SetDefault("nats.stream", "ELECPOSTAL_INBOUND")
+	v.SetDefault("nats.subject", "elecpostal.smtp.inbound")
+	v.SetDefault("nats.consumer", "elecpostal-smtp-workers")
+	v.SetDefault("nats.workers", 8)
 	v.SetDefault("auth.target", "")
 	v.SetDefault("auth.useTLS", false)
 	v.SetDefault("auth.tlsSkipVerify", false)
@@ -146,6 +178,18 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("workspace.useTLS", false)
 	v.SetDefault("workspace.tlsSkipVerify", false)
 	v.SetDefault("mail.domain", "")
+	v.SetDefault("mail.sendLimits.free.mailboxDaily", 100)
+	v.SetDefault("mail.sendLimits.free.mailboxMonthly", 2000)
+	v.SetDefault("mail.sendLimits.free.workspaceDaily", 100)
+	v.SetDefault("mail.sendLimits.free.workspaceMonthly", 2000)
+	v.SetDefault("mail.sendLimits.pro.mailboxDaily", 1000)
+	v.SetDefault("mail.sendLimits.pro.mailboxMonthly", 20000)
+	v.SetDefault("mail.sendLimits.pro.workspaceDaily", 3000)
+	v.SetDefault("mail.sendLimits.pro.workspaceMonthly", 60000)
+	v.SetDefault("mail.sendLimits.enterprise.mailboxDaily", 5000)
+	v.SetDefault("mail.sendLimits.enterprise.mailboxMonthly", 100000)
+	v.SetDefault("mail.sendLimits.enterprise.workspaceDaily", 25000)
+	v.SetDefault("mail.sendLimits.enterprise.workspaceMonthly", 500000)
 	v.SetDefault("mail.relay.adapter", "")
 	v.SetDefault("mail.relay.port", "587")
 	v.SetDefault("mail.relay.tlsMode", "starttls")
@@ -190,6 +234,7 @@ func applyEnvOverrides(v *viper.Viper) {
 	setEnvIfPresent(v, "auth.target", "AUTH_TARGET")
 	setEnvIfPresent(v, "filesystem.target", "FILESYSTEM_TARGET")
 	setEnvIfPresent(v, "workspace.target", "WORKSPACE_TARGET")
+	setEnvIfPresent(v, "nats.target", "NATS_URL")
 	setEnvIfPresent(v, "mail.domain", "MAIL_DOMAIN")
 	setEnvIfPresent(v, "mail.relay.adapter", "MAIL_RELAY_ADAPTER")
 	setEnvIfPresent(v, "mail.relay.host", "MAIL_RELAY_HOST")

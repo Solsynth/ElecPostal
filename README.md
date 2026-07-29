@@ -50,6 +50,15 @@ this calculation because it is already counted by DysonFS. When the allowance
 is exceeded, ElecPostal archives the oldest messages and permanently removes
 their raw records after 30 days.
 
+## Outbound send limits
+
+Outbound messages are counted both per mailbox and across the workspace. The
+defaults are configurable under `mail.sendLimits.free`, `mail.sendLimits.pro`,
+and `mail.sendLimits.enterprise`; each plan has `mailboxDaily`,
+`mailboxMonthly`, `workspaceDaily`, and `workspaceMonthly` values. Set a value
+to `0` to disable that specific limit. Drafts do not consume quota; scheduled
+messages consume it when they are delivered.
+
 ## Credentials
 
 Create scoped, revocable app passwords at `POST /api/credentials` with a

@@ -22,12 +22,38 @@ type Provider interface {
 	AuthorizeMember(context.Context, string, string) error
 	PlanStorageBytes(context.Context, string) (int64, error)
 	MailboxLimit(context.Context, string) (int64, error)
+	SendLimits(context.Context, string) (SendLimits, error)
 	Close() error
 }
 
+// SendLimits constrains outbound message attempts for both one mailbox and
+// all mailboxes in a workspace. A zero value disables that particular limit.
+type SendLimits struct {
+	MailboxDaily     int64
+	MailboxMonthly   int64
+	WorkspaceDaily   int64
+	WorkspaceMonthly int64
+}
+
+// SendLimitPolicy selects send limits by Workspace plan.
+type SendLimitPolicy struct {
+	Free       SendLimits
+	Pro        SendLimits
+	Enterprise SendLimits
+}
+
+func DefaultSendLimitPolicy() SendLimitPolicy {
+	return SendLimitPolicy{
+		Free:       SendLimits{MailboxDaily: 100, MailboxMonthly: 2000, WorkspaceDaily: 100, WorkspaceMonthly: 2000},
+		Pro:        SendLimits{MailboxDaily: 1000, MailboxMonthly: 20000, WorkspaceDaily: 3000, WorkspaceMonthly: 60000},
+		Enterprise: SendLimits{MailboxDaily: 5000, MailboxMonthly: 100000, WorkspaceDaily: 25000, WorkspaceMonthly: 500000},
+	}
+}
+
 type Client struct {
-	conn   *grpc.ClientConn
-	client gen.DyWorkspaceServiceClient
+	conn       *grpc.ClientConn
+	client     gen.DyWorkspaceServiceClient
+	sendLimits SendLimitPolicy
 }
 
 func NewClient(target string, useTLS, tlsSkipVerify bool) (*Client, error) {
@@ -44,8 +70,11 @@ func NewClient(target string, useTLS, tlsSkipVerify bool) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("connect to workspace: %w", err)
 	}
-	return &Client{conn: conn, client: gen.NewDyWorkspaceServiceClient(conn)}, nil
+	return &Client{conn: conn, client: gen.NewDyWorkspaceServiceClient(conn), sendLimits: DefaultSendLimitPolicy()}, nil
 }
+
+// SetSendLimitPolicy applies deployment-specific plan limits.
+func (c *Client) SetSendLimitPolicy(policy SendLimitPolicy) { c.sendLimits = policy }
 
 func (c *Client) AuthorizeMember(ctx context.Context, workspaceID, accountID string) error {
 	member, err := c.client.IsMemberWithRole(ctx, &gen.DyIsWorkspaceMemberWithRoleRequest{
@@ -85,6 +114,21 @@ func (c *Client) MailboxLimit(ctx context.Context, workspaceID string) (int64, e
 		return 0, err
 	}
 	return mailboxLimitForPlan(workspace.GetPlan()), nil
+}
+
+func (c *Client) SendLimits(ctx context.Context, workspaceID string) (SendLimits, error) {
+	workspace, err := c.getWorkspace(ctx, workspaceID)
+	if err != nil {
+		return SendLimits{}, err
+	}
+	switch workspace.GetPlan() {
+	case gen.DyWorkspacePlan_ENTERPRISE:
+		return c.sendLimits.Enterprise, nil
+	case gen.DyWorkspacePlan_PRO:
+		return c.sendLimits.Pro, nil
+	default:
+		return c.sendLimits.Free, nil
+	}
 }
 
 func (c *Client) getWorkspace(ctx context.Context, workspaceID string) (*gen.DyWorkspace, error) {

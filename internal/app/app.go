@@ -22,17 +22,20 @@ import (
 	"src.solsynth.dev/sosys/elecpostal/internal/ring"
 	"src.solsynth.dev/sosys/elecpostal/internal/server"
 	"src.solsynth.dev/sosys/elecpostal/internal/service"
+	"src.solsynth.dev/sosys/elecpostal/internal/smtp"
 	"src.solsynth.dev/sosys/elecpostal/internal/workspace"
 )
 
 // App is the application runtime.
 type App struct {
-	cfg      *config.Config
-	db       *database.DB
-	emailSvc *service.EmailService
-	httpSrv  *http.Server
-	grpcSrv  *grpc.Server
-	grpcLn   net.Listener
+	cfg       *config.Config
+	db        *database.DB
+	emailSvc  *service.EmailService
+	httpSrv   *http.Server
+	grpcSrv   *grpc.Server
+	grpcLn    net.Listener
+	smtpSrv   *smtp.Server
+	smtpQueue *smtp.NATSQueue
 }
 
 const healthServiceName = "elecpostal"
@@ -101,10 +104,27 @@ func New(cfg *config.Config) (*App, error) {
 		if err != nil {
 			return nil, err
 		}
+		workspaceClient.SetSendLimitPolicy(workspace.SendLimitPolicy{
+			Free:       sendLimitsFromConfig(cfg.Mail.SendLimits.Free),
+			Pro:        sendLimitsFromConfig(cfg.Mail.SendLimits.Pro),
+			Enterprise: sendLimitsFromConfig(cfg.Mail.SendLimits.Enterprise),
+		})
 		emailSvc.SetWorkspaceProvider(workspaceClient)
 		logging.Log.Info().Str("target", cfg.Workspace.Target).Msg("workspace quota provider configured")
 	}
 	router := server.NewRouter(cfg, emailSvc)
+	smtpSrv, err := smtp.New(cfg.Mail.SMTP, cfg.Mail.Domain, emailSvc)
+	if err != nil {
+		return nil, fmt.Errorf("configure SMTP server: %w", err)
+	}
+	var smtpQueue *smtp.NATSQueue
+	if cfg.NATS.Target != "" {
+		smtpQueue, err = smtp.NewNATSQueue(cfg.NATS, emailSvc)
+		if err != nil {
+			return nil, fmt.Errorf("configure SMTP NATS queue: %w", err)
+		}
+		smtpSrv.SetDeliveryQueue(smtpQueue)
+	}
 
 	httpSrv := &http.Server{
 		Addr:         ":" + cfg.HTTP.Port,
@@ -134,18 +154,43 @@ func New(cfg *config.Config) (*App, error) {
 	reflection.Register(grpcSrv)
 
 	return &App{
-		cfg:      cfg,
-		db:       db,
-		emailSvc: emailSvc,
-		httpSrv:  httpSrv,
-		grpcSrv:  grpcSrv,
+		cfg:       cfg,
+		db:        db,
+		emailSvc:  emailSvc,
+		httpSrv:   httpSrv,
+		grpcSrv:   grpcSrv,
+		smtpSrv:   smtpSrv,
+		smtpQueue: smtpQueue,
 	}, nil
+}
+
+func sendLimitsFromConfig(limits config.MailSendLimitConfig) workspace.SendLimits {
+	return workspace.SendLimits{
+		MailboxDaily: limits.MailboxDaily, MailboxMonthly: limits.MailboxMonthly,
+		WorkspaceDaily: limits.WorkspaceDaily, WorkspaceMonthly: limits.WorkspaceMonthly,
+	}
 }
 
 // Start runs background services and servers.
 func (a *App) Start(ctx context.Context) error {
+	if a.smtpQueue != nil {
+		if err := a.smtpQueue.Start(); err != nil {
+			return err
+		}
+	}
+	if a.smtpSrv != nil {
+		if err := a.smtpSrv.Start(); err != nil {
+			if a.smtpQueue != nil {
+				_ = a.smtpQueue.Close()
+			}
+			return err
+		}
+	}
 	ln, err := net.Listen("tcp", ":"+a.cfg.GRPC.Port)
 	if err != nil {
+		if a.smtpSrv != nil {
+			_ = a.smtpSrv.Close()
+		}
 		return err
 	}
 	a.grpcLn = ln
@@ -166,6 +211,7 @@ func (a *App) Start(ctx context.Context) error {
 	logging.Log.Info().
 		Str("http", a.cfg.HTTP.Port).
 		Str("grpc", a.cfg.GRPC.Port).
+		Str("smtp", a.cfg.Mail.SMTP.Port).
 		Msg("elecpostal started")
 	return nil
 }
@@ -201,6 +247,12 @@ func (a *App) purgeArchivedEmails(ctx context.Context) {
 		if count > 0 {
 			logging.Log.Info().Int64("count", count).Msg("purged archived emails")
 		}
+		usageCount, err := a.emailSvc.PurgeExpiredSendUsage(ctx)
+		if err != nil {
+			logging.Log.Error().Err(err).Msg("purge expired email send usage")
+		} else if usageCount > 0 {
+			logging.Log.Info().Int64("count", usageCount).Msg("purged expired email send usage")
+		}
 	}
 	purge()
 	ticker := time.NewTicker(time.Hour)
@@ -217,6 +269,12 @@ func (a *App) purgeArchivedEmails(ctx context.Context) {
 
 // Stop gracefully shuts down the application.
 func (a *App) Stop(ctx context.Context) error {
+	if a.smtpSrv != nil {
+		_ = a.smtpSrv.Close()
+	}
+	if a.smtpQueue != nil {
+		_ = a.smtpQueue.Close()
+	}
 	if a.httpSrv != nil {
 		_ = a.httpSrv.Shutdown(ctx)
 	}

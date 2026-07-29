@@ -21,3 +21,16 @@ func TestMailboxLimitForPlan(t *testing.T) {
 		}
 	}
 }
+
+func TestDefaultSendLimitPolicy(t *testing.T) {
+	policy := DefaultSendLimitPolicy()
+	if got := policy.Free; got.MailboxDaily != 100 || got.MailboxMonthly != 2000 || got.WorkspaceDaily != 100 || got.WorkspaceMonthly != 2000 {
+		t.Fatalf("unexpected free send limits: %+v", got)
+	}
+	if got := policy.Pro; got.MailboxDaily != 1000 || got.MailboxMonthly != 20000 || got.WorkspaceDaily != 3000 || got.WorkspaceMonthly != 60000 {
+		t.Fatalf("unexpected pro send limits: %+v", got)
+	}
+	if got := policy.Enterprise; got.MailboxDaily != 5000 || got.MailboxMonthly != 100000 || got.WorkspaceDaily != 25000 || got.WorkspaceMonthly != 500000 {
+		t.Fatalf("unexpected enterprise send limits: %+v", got)
+	}
+}
