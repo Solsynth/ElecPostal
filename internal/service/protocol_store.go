@@ -90,12 +90,20 @@ func protocolFolderName(folder string) string {
 }
 
 func (s *EmailService) ListProtocolFolder(ctx context.Context, mailboxID, name string) ([]ProtocolMessage, *database.MailFolder, error) {
+	name = strings.TrimSpace(name)
+	// The empty string is the IMAP hierarchy root, not a selectable mailbox.
+	// Reject it before querying so exploratory client commands do not create
+	// misleading GORM "record not found" warnings.
+	if name == "" {
+		return nil, nil, ErrNotFound
+	}
 	var folder database.MailFolder
-	if err := s.db.WithContext(ctx).Where("mailbox_id = ? AND name = ?", mailboxID, name).First(&folder).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return nil, nil, ErrNotFound
-		}
-		return nil, nil, err
+	result := s.db.WithContext(ctx).Where("mailbox_id = ? AND name = ?", mailboxID, name).Find(&folder)
+	if result.Error != nil {
+		return nil, nil, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return nil, nil, ErrNotFound
 	}
 	type row struct {
 		EmailID string
