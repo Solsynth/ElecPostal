@@ -41,6 +41,54 @@ type ProtocolStoreResult struct {
 	ModSeq  uint64
 }
 
+// BackfillProtocolStorage gives messages created before IMAP/POP3 support a
+// canonical source and a membership in their existing HTTP folder.  It is
+// idempotent and intentionally runs in bounded batches at startup while this
+// service is still pre-release.
+func (s *EmailService) BackfillProtocolStorage(ctx context.Context) (int, error) {
+	const batchSize = 250
+	created := 0
+	for {
+		var emails []database.Email
+		if err := s.db.WithContext(ctx).
+			Joins("LEFT JOIN message_sources ON message_sources.email_id = emails.id").
+			Where("message_sources.id IS NULL").Order("emails.created_at ASC").Limit(batchSize).Find(&emails).Error; err != nil {
+			return created, err
+		}
+		if len(emails) == 0 {
+			return created, nil
+		}
+		for _, email := range emails {
+			if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+				if err := s.storeProtocolSourceTx(tx, &email, nil, email.FromAddress); err != nil {
+					return err
+				}
+				return s.addFolderMembershipTx(tx, email.MailboxID, protocolFolderName(email.Folder), email.ID)
+			}); err != nil {
+				return created, err
+			}
+			created++
+		}
+	}
+}
+
+func protocolFolderName(folder string) string {
+	switch strings.ToLower(strings.TrimSpace(folder)) {
+	case "sent":
+		return "Sent"
+	case "drafts":
+		return "Drafts"
+	case "spam":
+		return "Spam"
+	case "trash":
+		return "Trash"
+	case "archive":
+		return "Archive"
+	default:
+		return "INBOX"
+	}
+}
+
 func (s *EmailService) ListProtocolFolder(ctx context.Context, mailboxID, name string) ([]ProtocolMessage, *database.MailFolder, error) {
 	var folder database.MailFolder
 	if err := s.db.WithContext(ctx).Where("mailbox_id = ? AND name = ?", mailboxID, name).First(&folder).Error; err != nil {

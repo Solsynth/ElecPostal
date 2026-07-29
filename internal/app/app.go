@@ -63,6 +63,11 @@ func New(cfg *config.Config) (*App, error) {
 	}
 
 	emailSvc := service.NewEmailService(db, notifier)
+	if count, err := emailSvc.BackfillProtocolStorage(context.Background()); err != nil {
+		return nil, fmt.Errorf("backfill protocol mailbox storage: %w", err)
+	} else if count > 0 {
+		logging.Log.Info().Int("count", count).Msg("backfilled protocol mailbox storage")
+	}
 	if cfg.WebSocket.Target != "" {
 		publisher, err := realtime.NewClient(cfg.WebSocket.Target, cfg.WebSocket.UseTLS, cfg.WebSocket.TLSSkipVerify)
 		if err != nil {
