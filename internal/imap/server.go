@@ -22,6 +22,7 @@ import (
 type Backend interface {
 	AuthenticateMailProtocolAddress(context.Context, string, string, string) (*service.ProtocolPrincipal, error)
 	ListProtocolFolder(context.Context, string, string) ([]service.ProtocolMessage, *database.MailFolder, error)
+	ListProtocolFolders(context.Context, string) ([]database.MailFolder, error)
 	MoveProtocolMessages(context.Context, string, string, string, []string) error
 	CopyProtocolMessages(context.Context, string, string, string, []string) error
 	StoreProtocolFlags(context.Context, string, string, []string, []string, string, uint64) ([]service.ProtocolStoreResult, error)
@@ -150,11 +151,28 @@ func (s *Server) serve(conn net.Conn) {
 					out(w, tag+" NO [PRIVACYREQUIRED] STARTTLS required")
 					continue
 				}
-				if len(args) < 2 || strings.ToUpper(args[0]) != "PLAIN" {
+				if len(args) < 1 || strings.ToUpper(args[0]) != "PLAIN" {
 					out(w, tag+" NO unsupported authentication mechanism")
 					continue
 				}
-				decoded, err := base64.StdEncoding.DecodeString(args[1])
+				payload := ""
+				if len(args) >= 2 {
+					payload = args[1]
+				} else {
+					// RFC 4959 continuation form, used by aerc and many Apple
+					// Mail configurations when SASL-IR is not advertised.
+					out(w, "+ ")
+					line, err := r.ReadString('\n')
+					if err != nil {
+						return
+					}
+					payload = strings.TrimSpace(line)
+					if payload == "*" {
+						out(w, tag+" NO authentication cancelled")
+						continue
+					}
+				}
+				decoded, err := base64.StdEncoding.DecodeString(payload)
 				parts := strings.Split(string(decoded), "\x00")
 				if err != nil || len(parts) != 3 {
 					out(w, tag+" NO authentication failed")
@@ -184,10 +202,21 @@ func (s *Server) serve(conn net.Conn) {
 			out(w, "* NAMESPACE ((\"\" \"/\")) NIL NIL")
 			out(w, tag+" OK NAMESPACE completed")
 		case "LIST", "LSUB":
-			for _, name := range []string{"INBOX", "Sent", "Drafts", "Spam", "Trash", "Archive"} {
-				out(w, fmt.Sprintf("* LIST (\\HasNoChildren) \"/\" \"%s\"", name))
+			folders, err := s.backend.ListProtocolFolders(context.Background(), principal.MailboxID)
+			if err != nil {
+				out(w, tag+" NO folders unavailable")
+				continue
+			}
+			for _, folder := range folders {
+				attrs := []string{"\\HasNoChildren"}
+				if specialUse := imapSpecialUse(folder.SpecialUse); specialUse != "" {
+					attrs = append(attrs, specialUse)
+				}
+				out(w, fmt.Sprintf("* LIST (%s) \"/\" \"%s\"", strings.Join(attrs, " "), folder.Name))
 			}
 			out(w, tag+" OK LIST completed")
+		case "STATUS":
+			s.status(w, tag, args, principal)
 		case "ENABLE":
 			enabled := []string{}
 			for _, capability := range args {
@@ -272,6 +301,11 @@ func (s *Server) serve(conn net.Conn) {
 		}
 	}
 }
+func imapSpecialUse(value string) string {
+	// Older development rows used two literal backslashes.  The wire protocol
+	// requires one, so normalize them while preserving existing data.
+	return strings.TrimPrefix(value, `\`)
+}
 func (s *Server) capability(secure, authenticated bool) string {
 	values := []string{"IMAP4rev1", "UIDPLUS", "MOVE", "IDLE", "SEARCH", "CONDSTORE", "QRESYNC", "SPECIAL-USE", "NAMESPACE"}
 	if !secure && s.tls != nil && strings.EqualFold(s.cfg.TLSMode, "starttls") {
@@ -302,6 +336,27 @@ func (s *Server) fetch(w *bufio.Writer, tag string, args []string, p *service.Pr
 		}
 	}
 	out(w, tag+" OK FETCH completed")
+}
+
+func (s *Server) status(w *bufio.Writer, tag string, args []string, p *service.ProtocolPrincipal) {
+	if len(args) < 1 {
+		out(w, tag+" BAD STATUS requires a mailbox")
+		return
+	}
+	name := unquote(args[0])
+	msgs, folder, err := s.backend.ListProtocolFolder(context.Background(), p.MailboxID, name)
+	if err != nil {
+		out(w, tag+" NO no such mailbox")
+		return
+	}
+	unseen := 0
+	for _, message := range msgs {
+		if !hasFlag(message.Flags, "\\Seen") {
+			unseen++
+		}
+	}
+	out(w, fmt.Sprintf("* STATUS \"%s\" (MESSAGES %d UNSEEN %d UIDNEXT %d UIDVALIDITY %d HIGHESTMODSEQ %d)", name, len(msgs), unseen, folder.NextUID, folder.UIDValidity, folder.HighestModSeq))
+	out(w, tag+" OK STATUS completed")
 }
 
 func (s *Server) store(w *bufio.Writer, tag string, args []string, p *service.ProtocolPrincipal, folder string, uid bool) {

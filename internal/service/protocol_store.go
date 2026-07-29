@@ -19,8 +19,8 @@ import (
 )
 
 var defaultProtocolFolders = []struct{ name, use string }{
-	{"INBOX", `\\Inbox`}, {"Sent", `\\Sent`}, {"Drafts", `\\Drafts`},
-	{"Spam", `\\Junk`}, {"Trash", `\\Trash`}, {"Archive", `\\Archive`},
+	{"INBOX", `\Inbox`}, {"Sent", `\Sent`}, {"Drafts", `\Drafts`},
+	{"Spam", `\Junk`}, {"Trash", `\Trash`}, {"Archive", `\Archive`},
 }
 
 // ProtocolMessage is the immutable, protocol-facing mailbox view.
@@ -39,6 +39,14 @@ type ProtocolStoreResult struct {
 	UID     uint32
 	Flags   []string
 	ModSeq  uint64
+}
+
+func (s *EmailService) ListProtocolFolders(ctx context.Context, mailboxID string) ([]database.MailFolder, error) {
+	var folders []database.MailFolder
+	if err := s.db.WithContext(ctx).Where("mailbox_id = ?", mailboxID).Order("name ASC").Find(&folders).Error; err != nil {
+		return nil, err
+	}
+	return folders, nil
 }
 
 // BackfillProtocolStorage gives messages created before IMAP/POP3 support a
