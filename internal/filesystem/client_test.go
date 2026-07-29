@@ -59,7 +59,7 @@ func TestUploadAttachmentStreamsContentWithEmailUsage(t *testing.T) {
 
 	client := &Client{conn: conn, client: gen.NewDyFileServiceClient(conn)}
 	accountID := uuid.New()
-	fileID, err := client.UploadAttachment(context.Background(), AttachmentUpload{
+	file, err := client.UploadAttachment(context.Background(), AttachmentUpload{
 		AccountID:   accountID,
 		WorkspaceID: "workspace-1",
 		Filename:    "invoice.pdf",
@@ -70,8 +70,8 @@ func TestUploadAttachmentStreamsContentWithEmailUsage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UploadAttachment() error = %v", err)
 	}
-	if fileID != "file-123" {
-		t.Fatalf("file ID = %q, want file-123", fileID)
+	if file.ID != "file-123" || file.Name != "invoice.pdf" {
+		t.Fatalf("file = %#v, want file-123/invoice.pdf", file)
 	}
 	if recorder.options.GetAccountId() != accountID.String() || recorder.options.GetWorkspaceId() != "workspace-1" {
 		t.Fatalf("owner options = %+v", recorder.options)

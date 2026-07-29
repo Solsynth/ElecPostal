@@ -187,6 +187,24 @@ func TestSMTPMIMEAttachmentIngestion(t *testing.T) {
 	}
 }
 
+func TestParseMessagePreservesInlineImageReference(t *testing.T) {
+	raw := []byte("Content-Type: multipart/related; boundary=inline\r\n\r\n--inline\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>Hello <img src=\"cid:logo-123\"></p>\r\n--inline\r\nContent-Type: image/png; name=logo.png\r\nContent-ID: <logo-123>\r\nContent-Disposition: inline; filename=logo.png\r\nContent-Transfer-Encoding: base64\r\n\r\naW1hZ2U=\r\n--inline--")
+	message, err := parseMessage(raw, "sender@example.test", nil)
+	if err != nil {
+		t.Fatalf("parseMessage() error = %v", err)
+	}
+	if message.contentType != "text/html" || !strings.Contains(message.body, "cid:logo-123") {
+		t.Fatalf("body = %q (%s), want HTML cid content", message.body, message.contentType)
+	}
+	if len(message.attachments) != 1 {
+		t.Fatalf("attachments = %#v", message.attachments)
+	}
+	attachment := message.attachments[0]
+	if attachment.contentID != "logo-123" || attachment.disposition != "inline" {
+		t.Fatalf("inline metadata = %#v", attachment)
+	}
+}
+
 func TestSMTPSubmissionRequiresAuthentication(t *testing.T) {
 	box := &database.Mailbox{ID: "alice"}
 	backend := &fakeBackend{authOK: true, mailboxes: map[string]*database.Mailbox{"alice@example.test": box}}

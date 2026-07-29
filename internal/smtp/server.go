@@ -462,8 +462,8 @@ type parsedMessage struct {
 	attachments                                           []storedAttachment
 }
 type storedAttachment struct {
-	filename, mimeType string
-	content            []byte
+	filename, mimeType, contentID, disposition string
+	content                                    []byte
 }
 
 func parseMessage(raw []byte, envelopeFrom string, envelopeRecipients []recipient) (parsedMessage, error) {
@@ -523,6 +523,7 @@ func parseEntity(header mail.Header, body io.Reader) (string, string, []storedAt
 		mediaType = "text/plain"
 	}
 	disposition, dparams, _ := mime.ParseMediaType(header.Get("Content-Disposition"))
+	contentID := strings.Trim(header.Get("Content-ID"), "<> ")
 	if strings.HasPrefix(strings.ToLower(mediaType), "multipart/") {
 		reader := multipart.NewReader(body, params["boundary"])
 		var plain, html string
@@ -558,14 +559,14 @@ func parseEntity(header mail.Header, body io.Reader) (string, string, []storedAt
 	if filename == "" {
 		filename = params["name"]
 	}
-	if strings.EqualFold(disposition, "attachment") || filename != "" {
+	if strings.EqualFold(disposition, "attachment") || strings.EqualFold(disposition, "inline") || filename != "" || contentID != "" {
 		if filename == "" {
 			filename = "attachment"
 		}
-		return "", "", []storedAttachment{{filename: filepath.Base(filename), mimeType: mediaType, content: data}}, nil
+		return "", "", []storedAttachment{{filename: filepath.Base(filename), mimeType: mediaType, contentID: contentID, disposition: strings.ToLower(disposition), content: data}}, nil
 	}
 	if strings.EqualFold(mediaType, "text/html") {
-		return string(data), "", nil, nil
+		return "", string(data), nil, nil
 	}
 	return string(data), "", nil, nil
 }

@@ -37,15 +37,17 @@ type deliveryJob struct {
 }
 
 type queuedAttachment struct {
-	Filename string `json:"filename"`
-	MimeType string `json:"mime_type"`
-	Content  []byte `json:"content"`
+	Filename    string `json:"filename"`
+	MimeType    string `json:"mime_type"`
+	ContentID   string `json:"content_id,omitempty"`
+	Disposition string `json:"disposition,omitempty"`
+	Content     []byte `json:"content"`
 }
 
 func newDeliveryJob(message parsedMessage, raw []byte, envelopeFrom string, recipients []recipient) deliveryJob {
 	job := deliveryJob{ID: uuid.NewString(), MessageID: message.id, FromAddress: message.fromAddress, FromName: message.fromName, Subject: message.subject, Body: message.body, ContentType: message.contentType, To: message.to, Cc: message.cc, Recipients: recipients, ReceivedAt: time.Now(), RawSource: raw, EnvelopeFrom: envelopeFrom}
 	for _, attachment := range message.attachments {
-		job.Attachments = append(job.Attachments, queuedAttachment{Filename: attachment.filename, MimeType: attachment.mimeType, Content: attachment.content})
+		job.Attachments = append(job.Attachments, queuedAttachment{Filename: attachment.filename, MimeType: attachment.mimeType, ContentID: attachment.contentID, Disposition: attachment.disposition, Content: attachment.content})
 	}
 	return job
 }
@@ -171,7 +173,7 @@ func deliverJob(ctx context.Context, backend Backend, job deliveryJob) error {
 		unique[recipient.mailboxID] = struct{}{}
 		attachments := make([]service.IncomingAttachment, 0, len(job.Attachments))
 		for _, attachment := range job.Attachments {
-			attachments = append(attachments, service.IncomingAttachment{Filename: attachment.Filename, MimeType: attachment.MimeType, Size: int64(len(attachment.Content)), Content: bytes.NewReader(attachment.Content)})
+			attachments = append(attachments, service.IncomingAttachment{Filename: attachment.Filename, MimeType: attachment.MimeType, Size: int64(len(attachment.Content)), ContentID: attachment.ContentID, Disposition: attachment.Disposition, Content: bytes.NewReader(attachment.Content)})
 		}
 		if _, err := backend.ReceiveEmail(ctx, service.ReceiveEmailInput{MailboxID: recipient.mailboxID, FromAddress: job.FromAddress, FromName: job.FromName, Subject: job.Subject, Body: job.Body, ContentType: job.ContentType, To: job.To, Cc: job.Cc, Attachments: attachments, SentAt: &job.ReceivedAt, Authentication: job.Authentication, RawSource: job.RawSource, EnvelopeFrom: job.EnvelopeFrom}); err != nil {
 			return err

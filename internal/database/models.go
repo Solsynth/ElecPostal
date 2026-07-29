@@ -100,14 +100,39 @@ func (r *Recipient) BeforeCreate(tx *gorm.DB) error {
 
 // Attachment stores metadata for an email attachment.
 type Attachment struct {
-	ID         string    `gorm:"primaryKey;size:36" json:"id"`
-	EmailID    string    `gorm:"index:idx_attachments_email_id;size:36" json:"email_id"`
-	Filename   string    `gorm:"size:255" json:"filename"`
-	MimeType   string    `gorm:"size:128" json:"mime_type"`
-	Size       int64     `json:"size"`
-	StorageKey *string   `gorm:"size:128" json:"storage_key,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID          string                    `gorm:"primaryKey;size:36" json:"id"`
+	EmailID     string                    `gorm:"index:idx_attachments_email_id;size:36" json:"email_id"`
+	Filename    string                    `gorm:"size:255" json:"filename"`
+	MimeType    string                    `gorm:"size:128" json:"mime_type"`
+	Size        int64                     `json:"size"`
+	StorageKey  *string                   `gorm:"size:128" json:"storage_key,omitempty"`
+	File        *CloudFileReferenceObject `gorm:"serializer:json;type:jsonb" json:"file,omitempty"`
+	ContentID   string                    `gorm:"size:512" json:"content_id,omitempty"`
+	Disposition string                    `gorm:"size:32" json:"disposition,omitempty"`
+	CreatedAt   time.Time                 `json:"created_at"`
+	UpdatedAt   time.Time                 `json:"updated_at"`
+}
+
+// CloudFileReferenceObject is the denormalized DysonFS file snapshot stored
+// with an email attachment. It mirrors the reference-object pattern used by
+// DysonNetwork services, so clients can render files without treating the
+// email attachment row ID as a Drive file ID.
+type CloudFileReferenceObject struct {
+	ID              string         `json:"id"`
+	Name            string         `json:"name"`
+	FileMeta        map[string]any `json:"file_meta"`
+	UserMeta        map[string]any `json:"user_meta"`
+	SensitiveMarks  []int          `json:"sensitive_marks"`
+	MimeType        string         `json:"mime_type"`
+	Hash            string         `json:"hash"`
+	Size            int64          `json:"size"`
+	HasCompression  bool           `json:"has_compression"`
+	URL             string         `json:"url,omitempty"`
+	Width           *int           `json:"width,omitempty"`
+	Height          *int           `json:"height,omitempty"`
+	Blurhash        string         `json:"blurhash,omitempty"`
+	Usage           string         `json:"usage,omitempty"`
+	ApplicationType string         `json:"application_type,omitempty"`
 }
 
 // MailProtocolCredential is a revocable app password for mail protocols. Its

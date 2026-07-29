@@ -48,10 +48,13 @@ type RecipientInput struct {
 
 // AttachmentInput is an attachment for a new email.
 type AttachmentInput struct {
-	Filename   string  `json:"filename" binding:"required"`
-	MimeType   string  `json:"mime_type"`
-	Size       int64   `json:"size"`
-	StorageKey *string `json:"storage_key,omitempty"`
+	Filename    string                             `json:"filename" binding:"required"`
+	MimeType    string                             `json:"mime_type"`
+	Size        int64                              `json:"size"`
+	StorageKey  *string                            `json:"storage_key,omitempty"`
+	File        *database.CloudFileReferenceObject `json:"file,omitempty"`
+	ContentID   string                             `json:"content_id,omitempty"`
+	Disposition string                             `json:"disposition,omitempty"`
 }
 
 // SendEmailInput is the payload for sending an email.
@@ -73,10 +76,12 @@ type SendEmailInput struct {
 // IncomingAttachment contains the raw content delivered by another mail
 // service. ElecPostal owns the subsequent FileSystem upload.
 type IncomingAttachment struct {
-	Filename string
-	MimeType string
-	Size     int64
-	Content  io.Reader
+	Filename    string
+	MimeType    string
+	Size        int64
+	ContentID   string
+	Disposition string
+	Content     io.Reader
 }
 
 // ReceiveEmailInput is the trusted interservice payload for an inbound email.
@@ -801,6 +806,7 @@ func (s *EmailService) SendEmail(ctx context.Context, accountID uuid.UUID, input
 	if err := s.enforceWorkspaceMailboxQuota(ctx, mailbox.WorkspaceID, mailboxLimit); err != nil {
 		return nil, err
 	}
+	s.publishMailEvent(ctx, email.AccountID.String(), "mail.created", &email)
 	if input.IsDraft || email.ScheduledAt != nil {
 		return &email, nil
 	}
@@ -1105,7 +1111,7 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 			}
 		}
 		for _, attachment := range attachments {
-			if err := tx.Create(&database.Attachment{EmailID: email.ID, Filename: attachment.Filename, MimeType: attachment.MimeType, Size: attachment.Size, StorageKey: attachment.StorageKey}).Error; err != nil {
+			if err := tx.Create(&database.Attachment{EmailID: email.ID, Filename: attachment.Filename, MimeType: attachment.MimeType, Size: attachment.Size, StorageKey: attachment.StorageKey, File: attachment.File, ContentID: attachment.ContentID, Disposition: attachment.Disposition}).Error; err != nil {
 				return err
 			}
 		}
@@ -1135,7 +1141,7 @@ func (s *EmailService) storeIncomingAttachment(ctx context.Context, mailbox data
 	if s.files == nil {
 		return AttachmentInput{}, fmt.Errorf("attachment uploads are not configured")
 	}
-	fileID, err := s.files.UploadAttachment(ctx, filesystem.AttachmentUpload{
+	file, err := s.files.UploadAttachment(ctx, filesystem.AttachmentUpload{
 		AccountID:   mailbox.AccountID,
 		WorkspaceID: mailbox.WorkspaceID,
 		Filename:    attachment.Filename,
@@ -1146,7 +1152,7 @@ func (s *EmailService) storeIncomingAttachment(ctx context.Context, mailbox data
 	if err != nil {
 		return AttachmentInput{}, err
 	}
-	return AttachmentInput{Filename: attachment.Filename, MimeType: attachment.MimeType, Size: attachment.Size, StorageKey: &fileID}, nil
+	return AttachmentInput{Filename: attachment.Filename, MimeType: attachment.MimeType, Size: attachment.Size, StorageKey: &file.ID, File: &file, ContentID: attachment.ContentID, Disposition: attachment.Disposition}, nil
 }
 
 // DeleteEmail moves a message to Trash. Permanent deletion remains reserved for
@@ -1198,8 +1204,15 @@ func (s *EmailService) publishMailEvent(ctx context.Context, accountID, eventTyp
 	if s.realtime == nil {
 		return
 	}
-	if err := s.realtime.Publish(ctx, accountID, eventType, email); err != nil {
-		logging.Log.Warn().Err(err).Str("event", eventType).Msg("publish mail websocket event")
+	// Realtime is a cache-invalidation signal, not an email transport. Sending
+	// only identifiers keeps private body and attachment data on the HTTP API.
+	notice := map[string]string{
+		"mailbox_id": email.MailboxID,
+		"email_id":   email.ID,
+		"reason":     eventType,
+	}
+	if err := s.realtime.Publish(ctx, accountID, "mail.changed", notice); err != nil {
+		logging.Log.Warn().Err(err).Str("event", eventType).Msg("publish mail websocket notice")
 	}
 }
 
