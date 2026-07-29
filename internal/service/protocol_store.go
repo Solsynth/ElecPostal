@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/mail"
+	"sort"
 	"strings"
 	"time"
 
@@ -28,6 +29,15 @@ type ProtocolMessage struct {
 	UID     uint32
 	Flags   []string
 	Raw     []byte
+	ModSeq  uint64
+}
+
+// ProtocolStoreResult is returned by STORE so an IMAP session can emit the
+// updated flags and mod-sequence without a follow-up query.
+type ProtocolStoreResult struct {
+	EmailID string
+	UID     uint32
+	Flags   []string
 	ModSeq  uint64
 }
 
@@ -83,12 +93,102 @@ func (s *EmailService) MoveProtocolMessages(ctx context.Context, mailboxID, from
 				return err
 			}
 		}
+		source.HighestModSeq++
 		if err := tx.Where("folder_id = ? AND email_id IN ?", source.ID, emailIDs).Delete(&database.FolderMessage{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Save(&source).Error; err != nil {
 			return err
 		}
 		return tx.Save(&target).Error
 	})
 }
+
+func (s *EmailService) CopyProtocolMessages(ctx context.Context, mailboxID, from, to string, emailIDs []string) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var source, target database.MailFolder
+		if err := tx.Clauses(clauseLock()).Where("mailbox_id = ? AND name = ?", mailboxID, from).First(&source).Error; err != nil {
+			return ErrNotFound
+		}
+		if err := tx.Clauses(clauseLock()).Where("mailbox_id = ? AND name = ?", mailboxID, to).First(&target).Error; err != nil {
+			return ErrNotFound
+		}
+		var rows []database.FolderMessage
+		if err := tx.Where("folder_id = ? AND email_id IN ?", source.ID, emailIDs).Find(&rows).Error; err != nil {
+			return err
+		}
+		for _, row := range rows {
+			row.FolderID, row.UID, row.ModSeq = target.ID, target.NextUID, target.HighestModSeq+1
+			target.NextUID++
+			target.HighestModSeq++
+			if err := tx.Create(&row).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Save(&target).Error
+	})
+}
+
+func (s *EmailService) StoreProtocolFlags(ctx context.Context, mailboxID, folderName string, emailIDs []string, flags []string, mode string, unchangedSince uint64) ([]ProtocolStoreResult, error) {
+	var result []ProtocolStoreResult
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var folder database.MailFolder
+		if err := tx.Clauses(clauseLock()).Where("mailbox_id = ? AND name = ?", mailboxID, folderName).First(&folder).Error; err != nil {
+			return ErrNotFound
+		}
+		var rows []database.FolderMessage
+		if err := tx.Where("folder_id = ? AND email_id IN ?", folder.ID, emailIDs).Find(&rows).Error; err != nil {
+			return err
+		}
+		for _, row := range rows {
+			if unchangedSince > 0 && row.ModSeq > unchangedSince {
+				continue
+			}
+			var previous []string
+			_ = json.Unmarshal(row.Flags, &previous)
+			row.Flags = datatypes.JSON(marshalFlags(mergeFlags(previous, flags, mode)))
+			folder.HighestModSeq++
+			row.ModSeq = folder.HighestModSeq
+			if err := tx.Save(&row).Error; err != nil {
+				return err
+			}
+			var updated []string
+			_ = json.Unmarshal(row.Flags, &updated)
+			result = append(result, ProtocolStoreResult{EmailID: row.EmailID, UID: row.UID, Flags: updated, ModSeq: row.ModSeq})
+		}
+		return tx.Save(&folder).Error
+	})
+	return result, err
+}
+
+func mergeFlags(current, requested []string, mode string) []string {
+	set := map[string]bool{}
+	for _, value := range current {
+		set[value] = true
+	}
+	switch mode {
+	case "replace":
+		set = map[string]bool{}
+		for _, value := range requested {
+			set[value] = true
+		}
+	case "add":
+		for _, value := range requested {
+			set[value] = true
+		}
+	case "remove":
+		for _, value := range requested {
+			delete(set, value)
+		}
+	}
+	result := make([]string, 0, len(set))
+	for value := range set {
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
+}
+func marshalFlags(flags []string) []byte { value, _ := json.Marshal(flags); return value }
 
 // ensureProtocolFoldersTx establishes the stable per-address IMAP namespace.
 func (s *EmailService) ensureProtocolFoldersTx(tx *gorm.DB, mailboxID string) error {
