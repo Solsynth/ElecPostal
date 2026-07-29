@@ -295,7 +295,9 @@ func (s *Server) serve(raw net.Conn) {
 	}
 }
 
-func (s *Server) requiresAuthentication() bool { return strings.TrimSpace(s.cfg.Port) == "587" }
+func (s *Server) requiresAuthentication() bool {
+	return s.cfg.RequireAuth || strings.TrimSpace(s.cfg.Port) == "587"
+}
 func (s *Server) maxRecipients() int {
 	if s.cfg.MaxRecipients > 0 {
 		return s.cfg.MaxRecipients

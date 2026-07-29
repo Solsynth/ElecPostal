@@ -34,7 +34,7 @@ type App struct {
 	httpSrv   *http.Server
 	grpcSrv   *grpc.Server
 	grpcLn    net.Listener
-	smtpSrv   *smtp.Server
+	smtpSrvs  []*smtp.Server
 	smtpQueue *smtp.NATSQueue
 }
 
@@ -113,9 +113,14 @@ func New(cfg *config.Config) (*App, error) {
 		logging.Log.Info().Str("target", cfg.Workspace.Target).Msg("workspace quota provider configured")
 	}
 	router := server.NewRouter(cfg, emailSvc)
-	smtpSrv, err := smtp.New(cfg.Mail.SMTP, cfg.Mail.Domain, emailSvc)
-	if err != nil {
-		return nil, fmt.Errorf("configure SMTP server: %w", err)
+	smtpConfigs := []config.ListenerConfig{cfg.Mail.SMTP, cfg.Mail.Submission}
+	smtpSrvs := make([]*smtp.Server, 0, len(smtpConfigs))
+	for _, listener := range smtpConfigs {
+		smtpSrv, err := smtp.New(listener, cfg.Mail.Domain, emailSvc)
+		if err != nil {
+			return nil, fmt.Errorf("configure SMTP server: %w", err)
+		}
+		smtpSrvs = append(smtpSrvs, smtpSrv)
 	}
 	var smtpQueue *smtp.NATSQueue
 	if cfg.NATS.Target != "" {
@@ -123,7 +128,9 @@ func New(cfg *config.Config) (*App, error) {
 		if err != nil {
 			return nil, fmt.Errorf("configure SMTP NATS queue: %w", err)
 		}
-		smtpSrv.SetDeliveryQueue(smtpQueue)
+		for _, smtpSrv := range smtpSrvs {
+			smtpSrv.SetDeliveryQueue(smtpQueue)
+		}
 	}
 
 	httpSrv := &http.Server{
@@ -159,7 +166,7 @@ func New(cfg *config.Config) (*App, error) {
 		emailSvc:  emailSvc,
 		httpSrv:   httpSrv,
 		grpcSrv:   grpcSrv,
-		smtpSrv:   smtpSrv,
+		smtpSrvs:  smtpSrvs,
 		smtpQueue: smtpQueue,
 	}, nil
 }
@@ -178,8 +185,11 @@ func (a *App) Start(ctx context.Context) error {
 			return err
 		}
 	}
-	if a.smtpSrv != nil {
-		if err := a.smtpSrv.Start(); err != nil {
+	for _, smtpSrv := range a.smtpSrvs {
+		if err := smtpSrv.Start(); err != nil {
+			for _, started := range a.smtpSrvs {
+				_ = started.Close()
+			}
 			if a.smtpQueue != nil {
 				_ = a.smtpQueue.Close()
 			}
@@ -188,8 +198,11 @@ func (a *App) Start(ctx context.Context) error {
 	}
 	ln, err := net.Listen("tcp", ":"+a.cfg.GRPC.Port)
 	if err != nil {
-		if a.smtpSrv != nil {
-			_ = a.smtpSrv.Close()
+		for _, smtpSrv := range a.smtpSrvs {
+			_ = smtpSrv.Close()
+		}
+		if a.smtpQueue != nil {
+			_ = a.smtpQueue.Close()
 		}
 		return err
 	}
@@ -212,6 +225,7 @@ func (a *App) Start(ctx context.Context) error {
 		Str("http", a.cfg.HTTP.Port).
 		Str("grpc", a.cfg.GRPC.Port).
 		Str("smtp", a.cfg.Mail.SMTP.Port).
+		Str("smtp_submission", a.cfg.Mail.Submission.Port).
 		Msg("elecpostal started")
 	return nil
 }
@@ -269,8 +283,8 @@ func (a *App) purgeArchivedEmails(ctx context.Context) {
 
 // Stop gracefully shuts down the application.
 func (a *App) Stop(ctx context.Context) error {
-	if a.smtpSrv != nil {
-		_ = a.smtpSrv.Close()
+	for _, smtpSrv := range a.smtpSrvs {
+		_ = smtpSrv.Close()
 	}
 	if a.smtpQueue != nil {
 		_ = a.smtpQueue.Close()

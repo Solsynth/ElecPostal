@@ -71,12 +71,23 @@ tlsSkipVerify = false
 [mail.smtp]
 enabled = true
 host = ""
-port = "587"               # submission default; use 25 for relay or 465 for implicit TLS
+port = "25"                # public inbound MX listener; accepts local recipients only
 tlsMode = "starttls"
 certFile = ""
 keyFile = ""
 maxMessageBytes = 26214400
 maxRecipients = 100
+
+[mail.submission]
+enabled = true
+host = ""
+port = "587"               # authenticated client submission
+tlsMode = "starttls"
+certFile = ""
+keyFile = ""
+maxMessageBytes = 26214400
+maxRecipients = 100
+requireAuth = true
 
 [mail.imap]
 enabled = true
