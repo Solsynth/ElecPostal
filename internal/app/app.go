@@ -16,7 +16,9 @@ import (
 	"src.solsynth.dev/sosys/elecpostal/internal/config"
 	"src.solsynth.dev/sosys/elecpostal/internal/database"
 	"src.solsynth.dev/sosys/elecpostal/internal/filesystem"
+	"src.solsynth.dev/sosys/elecpostal/internal/imap"
 	"src.solsynth.dev/sosys/elecpostal/internal/logging"
+	"src.solsynth.dev/sosys/elecpostal/internal/pop3"
 	"src.solsynth.dev/sosys/elecpostal/internal/realtime"
 	"src.solsynth.dev/sosys/elecpostal/internal/relay"
 	"src.solsynth.dev/sosys/elecpostal/internal/ring"
@@ -36,6 +38,8 @@ type App struct {
 	grpcLn    net.Listener
 	smtpSrvs  []*smtp.Server
 	smtpQueue *smtp.NATSQueue
+	imapSrvs  []*imap.Server
+	pop3Srvs  []*pop3.Server
 }
 
 const healthServiceName = "elecpostal"
@@ -132,6 +136,22 @@ func New(cfg *config.Config) (*App, error) {
 			smtpSrv.SetDeliveryQueue(smtpQueue)
 		}
 	}
+	imapSrvs := make([]*imap.Server, 0, len(cfg.Mail.IMAP))
+	for _, listener := range cfg.Mail.IMAP {
+		srv, err := imap.New(listener, emailSvc)
+		if err != nil {
+			return nil, fmt.Errorf("configure IMAP server: %w", err)
+		}
+		imapSrvs = append(imapSrvs, srv)
+	}
+	pop3Srvs := make([]*pop3.Server, 0, len(cfg.Mail.POP3))
+	for _, listener := range cfg.Mail.POP3 {
+		srv, err := pop3.New(listener, emailSvc)
+		if err != nil {
+			return nil, fmt.Errorf("configure POP3 server: %w", err)
+		}
+		pop3Srvs = append(pop3Srvs, srv)
+	}
 
 	httpSrv := &http.Server{
 		Addr:         ":" + cfg.HTTP.Port,
@@ -168,6 +188,8 @@ func New(cfg *config.Config) (*App, error) {
 		grpcSrv:   grpcSrv,
 		smtpSrvs:  smtpSrvs,
 		smtpQueue: smtpQueue,
+		imapSrvs:  imapSrvs,
+		pop3Srvs:  pop3Srvs,
 	}, nil
 }
 
@@ -193,6 +215,16 @@ func (a *App) Start(ctx context.Context) error {
 			if a.smtpQueue != nil {
 				_ = a.smtpQueue.Close()
 			}
+			return err
+		}
+	}
+	for _, srv := range a.imapSrvs {
+		if err := srv.Start(); err != nil {
+			return err
+		}
+	}
+	for _, srv := range a.pop3Srvs {
+		if err := srv.Start(); err != nil {
 			return err
 		}
 	}
@@ -284,6 +316,12 @@ func (a *App) purgeArchivedEmails(ctx context.Context) {
 func (a *App) Stop(ctx context.Context) error {
 	for _, smtpSrv := range a.smtpSrvs {
 		_ = smtpSrv.Close()
+	}
+	for _, srv := range a.imapSrvs {
+		_ = srv.Close()
+	}
+	for _, srv := range a.pop3Srvs {
+		_ = srv.Close()
 	}
 	if a.smtpQueue != nil {
 		_ = a.smtpQueue.Close()

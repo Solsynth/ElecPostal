@@ -314,8 +314,9 @@ All successful tag mutation endpoints return `{"ok":true}`.
 
 ## Credentials
 
-Credentials are dedicated, revocable app passwords for mail protocols. They are
-not valid for HTTP API authentication.
+Credentials are dedicated, revocable app passwords for one mailbox address and
+its selected mail protocols. They are not valid for HTTP API authentication or
+for another mailbox owned by the same account.
 
 ### List credentials
 
@@ -329,6 +330,7 @@ The secret and its hash are never returned.
 
 ```json
 {
+	"mailbox_id": "01J...",
   "label": "Thunderbird on laptop",
   "protocols": ["smtp", "imap"]
 }
@@ -342,7 +344,7 @@ once.
 {
   "credential": {
     "id": "01J...",
-    "account_id": "6d0a54f1-...",
+	"mailbox_id": "01J...",
     "label": "Thunderbird on laptop",
     "protocols": ["smtp", "imap"],
     "created_at": "2026-07-28T12:00:00Z"

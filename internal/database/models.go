@@ -113,14 +113,88 @@ type Attachment struct {
 // MailProtocolCredential is a revocable app password for mail protocols. Its
 // secret is stored only as a bcrypt hash and is never usable for HTTP APIs.
 type MailProtocolCredential struct {
-	ID        string         `gorm:"primaryKey;size:36" json:"id"`
-	AccountID uuid.UUID      `gorm:"index:idx_mail_protocol_credentials_account_id" json:"account_id"`
+	ID string `gorm:"primaryKey;size:36" json:"id"`
+	// MailboxID is the protocol security boundary.  A credential is never
+	// usable for another address owned by the same account.
+	MailboxID string `gorm:"index:idx_mail_protocol_credentials_mailbox_id;size:36" json:"mailbox_id"`
+	// AccountID is retained only to identify credentials created before the
+	// mailbox-scoped migration.  Legacy credentials are deliberately disabled.
+	AccountID *uuid.UUID     `gorm:"index:idx_mail_protocol_credentials_account_id" json:"account_id,omitempty"`
 	Label     string         `gorm:"size:128" json:"label"`
 	Hash      string         `gorm:"size:255" json:"-"`
 	Protocols datatypes.JSON `gorm:"type:jsonb" json:"protocols"`
+	Legacy    bool           `gorm:"not null;default:false" json:"legacy"`
 	DeletedAt gorm.DeletedAt `gorm:"index" json:"deleted_at"`
 	CreatedAt time.Time      `json:"created_at"`
 	UpdatedAt time.Time      `json:"updated_at"`
+}
+
+// MessageSource is the immutable RFC 5322 representation used by IMAP and
+// POP3.  Parsed Email fields remain an index/view for the HTTP API.
+type MessageSource struct {
+	ID           string    `gorm:"primaryKey;size:36" json:"id"`
+	EmailID      string    `gorm:"uniqueIndex;size:36" json:"email_id"`
+	Raw          []byte    `gorm:"type:bytea;not null" json:"-"`
+	SHA256       string    `gorm:"size:64;not null" json:"sha256"`
+	EnvelopeFrom string    `gorm:"size:255" json:"envelope_from"`
+	ReceivedAt   time.Time `gorm:"not null" json:"received_at"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+func (s *MessageSource) BeforeCreate(tx *gorm.DB) error {
+	if s.ID == "" {
+		s.ID = NewID()
+	}
+	return nil
+}
+
+// MailFolder is an IMAP mailbox belonging to one hosted address.  UID and
+// mod-sequence counters are advanced under a row lock by protocol services.
+type MailFolder struct {
+	ID            string    `gorm:"primaryKey;size:36" json:"id"`
+	MailboxID     string    `gorm:"uniqueIndex:idx_mail_folders_mailbox_name,priority:1;size:36" json:"mailbox_id"`
+	Name          string    `gorm:"uniqueIndex:idx_mail_folders_mailbox_name,priority:2;size:255" json:"name"`
+	UIDValidity   uint32    `gorm:"not null" json:"uid_validity"`
+	NextUID       uint32    `gorm:"not null;default:1" json:"next_uid"`
+	HighestModSeq uint64    `gorm:"not null;default:1" json:"highest_modseq"`
+	SpecialUse    string    `gorm:"size:32" json:"special_use,omitempty"`
+	Subscribed    bool      `gorm:"not null;default:true" json:"subscribed"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+func (f *MailFolder) BeforeCreate(tx *gorm.DB) error {
+	if f.ID == "" {
+		f.ID = NewID()
+	}
+	return nil
+}
+
+type FolderMessage struct {
+	FolderID  string         `gorm:"primaryKey;uniqueIndex:idx_folder_messages_uid,priority:1;size:36" json:"folder_id"`
+	EmailID   string         `gorm:"primaryKey;size:36" json:"email_id"`
+	UID       uint32         `gorm:"uniqueIndex:idx_folder_messages_uid,priority:2;not null" json:"uid"`
+	Flags     datatypes.JSON `gorm:"type:jsonb;not null" json:"flags"`
+	ModSeq    uint64         `gorm:"not null" json:"modseq"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+}
+
+type MailOutbox struct {
+	ID          string         `gorm:"primaryKey;size:36" json:"id"`
+	Kind        string         `gorm:"index;size:64" json:"kind"`
+	Payload     datatypes.JSON `gorm:"type:jsonb;not null" json:"payload"`
+	AvailableAt time.Time      `gorm:"index;not null" json:"available_at"`
+	Attempts    int            `gorm:"not null;default:0" json:"attempts"`
+	PublishedAt *time.Time     `gorm:"index" json:"published_at,omitempty"`
+	CreatedAt   time.Time      `json:"created_at"`
+}
+
+func (o *MailOutbox) BeforeCreate(tx *gorm.DB) error {
+	if o.ID == "" {
+		o.ID = NewID()
+	}
+	return nil
 }
 
 func (c *MailProtocolCredential) BeforeCreate(tx *gorm.DB) error {

@@ -29,17 +29,13 @@ func Open(cfg *config.Config) (*DB, error) {
 	return &DB{DB: db}, nil
 }
 
+// AutoMigrate provisions the schema for this pre-release service.
 func (d *DB) AutoMigrate() error {
 	if err := d.DB.AutoMigrate(
-		&Mailbox{},
-		&Email{},
-		&Recipient{},
-		&Attachment{},
-		&MailProtocolCredential{},
-		&EmailLabel{},
-		&EmailLabelMapping{},
-		&MailSendUsage{},
-		&MailBlockRule{},
+		&Mailbox{}, &Email{}, &Recipient{}, &Attachment{},
+		&MailProtocolCredential{}, &EmailLabel{}, &EmailLabelMapping{},
+		&MailSendUsage{}, &MailBlockRule{}, &MessageSource{}, &MailFolder{},
+		&FolderMessage{}, &MailOutbox{},
 	); err != nil {
 		return err
 	}

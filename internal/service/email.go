@@ -95,6 +95,11 @@ type ReceiveEmailInput struct {
 	Attachments    []IncomingAttachment
 	SentAt         *time.Time
 	Authentication datatypes.JSON
+	// RawSource is the unmodified RFC 5322 payload used by IMAP/POP3.  Trusted
+	// callers that do not have a source may omit it; a canonical source is then
+	// synthesized from the indexed fields.
+	RawSource    []byte
+	EnvelopeFrom string
 }
 
 // ListInput is pagination for list endpoints.
@@ -355,7 +360,10 @@ func (s *EmailService) CreateMailbox(ctx context.Context, accountID uuid.UUID, w
 		if count >= mailboxLimit {
 			return fmt.Errorf("%w: limit=%d", ErrMailboxLimitExceeded, mailboxLimit)
 		}
-		return tx.Create(&mailbox).Error
+		if err := tx.Create(&mailbox).Error; err != nil {
+			return err
+		}
+		return s.ensureProtocolFoldersTx(tx, mailbox.ID)
 	})
 	if err != nil {
 		return nil, err
@@ -778,7 +786,14 @@ func (s *EmailService) SendEmail(ctx context.Context, accountID uuid.UUID, input
 				return err
 			}
 		}
-		return nil
+		if err := s.storeProtocolSourceTx(tx, &email, nil, fromAddress); err != nil {
+			return err
+		}
+		folder := "Sent"
+		if input.IsDraft {
+			folder = "Drafts"
+		}
+		return s.addFolderMembershipTx(tx, mailbox.ID, folder, email.ID)
 	})
 	if err != nil {
 		return nil, err
@@ -1094,7 +1109,10 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 				return err
 			}
 		}
-		return nil
+		if err := s.storeProtocolSourceTx(tx, &email, input.RawSource, input.EnvelopeFrom); err != nil {
+			return err
+		}
+		return s.addInboxMembershipTx(tx, mailbox.ID, email.ID)
 	})
 	if err != nil {
 		logging.Log.Error().Err(err).Str("mailbox_id", mailbox.ID).Msg("failed to persist incoming email")
@@ -1462,6 +1480,9 @@ func outgoingRawSize(email database.Email, input SendEmailInput) int64 {
 }
 
 func incomingRawSize(email database.Email, input ReceiveEmailInput) int64 {
+	if len(input.RawSource) > 0 {
+		return int64(len(input.RawSource))
+	}
 	size := rawStringSize(email.Subject, email.Body, email.FromAddress, email.FromName)
 	for _, recipients := range [][]RecipientInput{input.To, input.Cc} {
 		for _, recipient := range recipients {

@@ -154,6 +154,7 @@ func (s *Server) removeConn(c net.Conn) { s.mu.Lock(); delete(s.conns, c); s.mu.
 
 type session struct {
 	authenticated bool
+	principal     *service.ProtocolPrincipal
 	from          string
 	recipients    []recipient
 }
@@ -232,6 +233,12 @@ func (s *Server) serve(raw net.Conn) {
 				writeReply(w, "501 5.5.4 Invalid MAIL FROM")
 				continue
 			}
+			// Authenticated submission is address-bound.  Keep the empty reverse
+			// path available for delivery-status notifications.
+			if state.principal != nil && state.principal.Address != "" && from != "<>" && !strings.EqualFold(from, state.principal.Address) {
+				writeReply(w, "553 5.7.1 Sender address does not match authenticated mailbox")
+				continue
+			}
 			state.from, state.recipients = from, nil
 			writeReply(w, "250 2.1.0 OK")
 		case "RCPT":
@@ -281,7 +288,7 @@ func (s *Server) serve(raw net.Conn) {
 				writeReply(w, "451 4.3.0 Unable to process message")
 				continue
 			}
-			if err := s.deliver(message, state.recipients); err != nil {
+			if err := s.deliver(message, rawMessage, state.from, state.recipients); err != nil {
 				logging.Log.Error().Err(err).Str("smtp_message_id", message.id).Msg("SMTP delivery failed")
 				writeReply(w, "451 4.3.0 Temporary delivery failure")
 			} else {
@@ -385,11 +392,13 @@ func (s *Server) authenticate(r *bufio.Reader, w *bufio.Writer, arg string, stat
 		writeReply(w, "504 5.5.4 Unsupported authentication mechanism")
 		return errors.New("unsupported auth")
 	}
-	if _, err := s.service.AuthenticateMailProtocolAddress(context.Background(), username, secret, "smtp"); err != nil {
+	principal, err := s.service.AuthenticateMailProtocolAddress(context.Background(), username, secret, "smtp")
+	if err != nil {
 		writeReply(w, "535 5.7.8 Authentication credentials invalid")
 		return err
 	}
 	state.authenticated = true
+	state.principal = principal
 	writeReply(w, "235 2.7.0 Authentication successful")
 	return nil
 }
@@ -562,6 +571,6 @@ func decodeTransfer(encoding string, body io.Reader) io.Reader {
 	}
 }
 
-func (s *Server) deliver(message parsedMessage, recipients []recipient) error {
-	return s.delivery.Enqueue(context.Background(), newDeliveryJob(message, recipients))
+func (s *Server) deliver(message parsedMessage, raw []byte, envelopeFrom string, recipients []recipient) error {
+	return s.delivery.Enqueue(context.Background(), newDeliveryJob(message, raw, envelopeFrom, recipients))
 }

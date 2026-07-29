@@ -22,5 +22,5 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 
 COPY --from=build /out/elecpostal /usr/local/bin/elecpostal
 
-EXPOSE 8080 9090
+EXPOSE 8080 9090 25 465 587 110 995 143 993
 ENTRYPOINT ["elecpostal"]

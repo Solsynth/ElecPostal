@@ -62,8 +62,17 @@ messages consume it when they are delivered.
 ## Credentials
 
 Create scoped, revocable app passwords at `POST /api/credentials` with a
-label and one or more protocols (`smtp`, `imap`, `pop3`). The returned `secret`
-is shown once and is only accepted by mail protocol listeners—not by HTTP APIs.
+`mailbox_id`, label, and one or more protocols (`smtp`, `imap`, `pop3`). The
+returned `secret` is shown once and is only accepted by that mailbox address's
+protocol listeners—not by HTTP APIs or another address on the same account.
+
+## Protocol storage
+
+ElecPostal retains the canonical RFC 5322 source for received and sent mail,
+with per-address IMAP folders and stable POP3/IMAP UIDs. This pre-release
+service uses GORM `AutoMigrate` on startup. The provided `docker-compose.yml`
+starts PostgreSQL, JetStream, Redis, and ElecPostal. Configure TLS certificates
+for all enabled SMTP, IMAP, and POP3 listeners.
 
 ## Outbound delivery
 

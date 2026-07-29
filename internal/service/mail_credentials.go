@@ -26,6 +26,7 @@ var validMailProtocols = map[string]struct{}{
 // CreateMailProtocolCredentialInput defines the label and protocol scopes for
 // a new account-owned mail app password.
 type CreateMailProtocolCredentialInput struct {
+	MailboxID string   `json:"mailbox_id" binding:"required"`
 	Label     string   `json:"label" binding:"required"`
 	Protocols []string `json:"protocols" binding:"required,min=1"`
 }
@@ -40,6 +41,8 @@ type CreatedMailProtocolCredential struct {
 // ProtocolPrincipal is the account authenticated for a mail protocol session.
 type ProtocolPrincipal struct {
 	AccountID    uuid.UUID
+	MailboxID    string
+	Address      string
 	CredentialID string
 }
 
@@ -66,8 +69,15 @@ func (s *EmailService) CreateMailProtocolCredential(ctx context.Context, account
 	if err != nil {
 		return nil, fmt.Errorf("hash app password: %w", err)
 	}
+	var mailbox database.Mailbox
+	if err := s.db.WithContext(ctx).Where("id = ? AND account_id = ?", input.MailboxID, accountID).First(&mailbox).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
 	credential := database.MailProtocolCredential{
-		AccountID: accountID,
+		MailboxID: mailbox.ID,
 		Label:     label,
 		Hash:      string(hash),
 		Protocols: encodedProtocols,
@@ -80,14 +90,16 @@ func (s *EmailService) CreateMailProtocolCredential(ctx context.Context, account
 
 func (s *EmailService) ListMailProtocolCredentials(ctx context.Context, accountID uuid.UUID) ([]database.MailProtocolCredential, error) {
 	var credentials []database.MailProtocolCredential
-	if err := s.db.WithContext(ctx).Where("account_id = ?", accountID).Order("created_at desc").Find(&credentials).Error; err != nil {
+	if err := s.db.WithContext(ctx).
+		Joins("JOIN mailboxes ON mailboxes.id = mail_protocol_credentials.mailbox_id").
+		Where("mailboxes.account_id = ?", accountID).Order("mail_protocol_credentials.created_at desc").Find(&credentials).Error; err != nil {
 		return nil, err
 	}
 	return credentials, nil
 }
 
 func (s *EmailService) DeleteMailProtocolCredential(ctx context.Context, accountID uuid.UUID, id string) error {
-	result := s.db.WithContext(ctx).Where("id = ? AND account_id = ?", id, accountID).Delete(&database.MailProtocolCredential{})
+	result := s.db.WithContext(ctx).Where("id = ? AND mailbox_id IN (SELECT id FROM mailboxes WHERE account_id = ?)", id, accountID).Delete(&database.MailProtocolCredential{})
 	if result.Error != nil {
 		return result.Error
 	}
@@ -99,7 +111,7 @@ func (s *EmailService) DeleteMailProtocolCredential(ctx context.Context, account
 
 // AuthenticateMailProtocol verifies a scoped app password. This is intended
 // solely for SMTP/IMAP/POP3 listeners; it does not authenticate HTTP requests.
-func (s *EmailService) AuthenticateMailProtocol(ctx context.Context, accountID uuid.UUID, secret, protocol string) (*ProtocolPrincipal, error) {
+func (s *EmailService) AuthenticateMailProtocol(ctx context.Context, mailboxID, secret, protocol string) (*ProtocolPrincipal, error) {
 	protocol = strings.ToLower(strings.TrimSpace(protocol))
 	if _, ok := validMailProtocols[protocol]; !ok {
 		return nil, fmt.Errorf("unsupported mail protocol %q", protocol)
@@ -107,8 +119,12 @@ func (s *EmailService) AuthenticateMailProtocol(ctx context.Context, accountID u
 	if strings.TrimSpace(secret) == "" {
 		return nil, ErrForbidden
 	}
+	var mailbox database.Mailbox
+	if err := s.db.WithContext(ctx).Where("id = ?", mailboxID).First(&mailbox).Error; err != nil {
+		return nil, ErrForbidden
+	}
 	var credentials []database.MailProtocolCredential
-	if err := s.db.WithContext(ctx).Where("account_id = ?", accountID).Find(&credentials).Error; err != nil {
+	if err := s.db.WithContext(ctx).Where("mailbox_id = ? AND legacy = ?", mailboxID, false).Find(&credentials).Error; err != nil {
 		return nil, err
 	}
 	for _, credential := range credentials {
@@ -120,7 +136,7 @@ func (s *EmailService) AuthenticateMailProtocol(ctx context.Context, accountID u
 			continue
 		}
 		if bcrypt.CompareHashAndPassword([]byte(credential.Hash), []byte(secret)) == nil {
-			return &ProtocolPrincipal{AccountID: accountID, CredentialID: credential.ID}, nil
+			return &ProtocolPrincipal{AccountID: mailbox.AccountID, MailboxID: mailbox.ID, Address: s.normalizeFromAddress(mailbox.Address), CredentialID: credential.ID}, nil
 		}
 	}
 	return nil, ErrForbidden
@@ -136,7 +152,7 @@ func (s *EmailService) AuthenticateMailProtocolAddress(ctx context.Context, addr
 		}
 		return nil, err
 	}
-	return s.AuthenticateMailProtocol(ctx, mailbox.AccountID, secret, protocol)
+	return s.AuthenticateMailProtocol(ctx, mailbox.ID, secret, protocol)
 }
 
 func normalizeMailProtocols(input []string) ([]string, error) {
