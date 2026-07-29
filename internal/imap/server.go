@@ -125,7 +125,7 @@ func (s *Server) serve(conn net.Conn) {
 				r, w = bufio.NewReader(conn), bufio.NewWriter(conn)
 				secure = true
 			case "CAPABILITY":
-				out(w, "* CAPABILITY IMAP4rev1 UIDPLUS MOVE IDLE SEARCH CONDSTORE QRESYNC SPECIAL-USE NAMESPACE AUTH=PLAIN")
+				out(w, "* CAPABILITY "+s.capability(secure, false))
 				out(w, tag+" OK CAPABILITY completed")
 			case "LOGIN":
 				if s.tls != nil && !secure {
@@ -176,7 +176,7 @@ func (s *Server) serve(conn net.Conn) {
 		}
 		switch cmd {
 		case "CAPABILITY":
-			out(w, "* CAPABILITY IMAP4rev1 UIDPLUS MOVE IDLE SEARCH CONDSTORE QRESYNC SPECIAL-USE NAMESPACE")
+			out(w, "* CAPABILITY "+s.capability(secure, true))
 			out(w, tag+" OK CAPABILITY completed")
 		case "NAMESPACE":
 			out(w, "* NAMESPACE ((\"\" \"/\")) NIL NIL")
@@ -269,6 +269,16 @@ func (s *Server) serve(conn net.Conn) {
 			out(w, tag+" BAD command not implemented")
 		}
 	}
+}
+func (s *Server) capability(secure, authenticated bool) string {
+	values := []string{"IMAP4rev1", "UIDPLUS", "MOVE", "IDLE", "SEARCH", "CONDSTORE", "QRESYNC", "SPECIAL-USE", "NAMESPACE"}
+	if !secure && s.tls != nil && strings.EqualFold(s.cfg.TLSMode, "starttls") {
+		values = append(values, "STARTTLS")
+	}
+	if !authenticated && (secure || s.tls == nil) {
+		values = append(values, "AUTH=PLAIN")
+	}
+	return strings.Join(values, " ")
 }
 func (s *Server) fetch(w *bufio.Writer, tag string, args []string, p *service.ProtocolPrincipal, folder string, uid bool) {
 	if folder == "" || len(args) < 2 {

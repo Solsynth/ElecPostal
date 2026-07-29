@@ -165,6 +165,7 @@ type recipient struct {
 
 func (s *Server) serve(raw net.Conn) {
 	conn := raw
+	secure := false
 	s.addConn(raw)
 	if strings.EqualFold(s.cfg.TLSMode, "implicit") {
 		conn = tls.Server(raw, s.tls)
@@ -173,6 +174,7 @@ func (s *Server) serve(raw net.Conn) {
 			_ = raw.Close()
 			return
 		}
+		secure = true
 		s.removeConn(raw)
 		s.addConn(conn)
 	}
@@ -194,7 +196,7 @@ func (s *Server) serve(raw net.Conn) {
 		switch verb {
 		case "EHLO", "HELO":
 			state.from, state.recipients = "", nil
-			s.writeGreeting(w, state.authenticated)
+			s.writeGreeting(w, state.authenticated, secure)
 		case "NOOP":
 			writeReply(w, "250 2.0.0 OK")
 		case "RSET":
@@ -219,7 +221,12 @@ func (s *Server) serve(raw net.Conn) {
 			r = bufio.NewReader(conn)
 			w = bufio.NewWriter(conn)
 			state = session{}
+			secure = true
 		case "AUTH":
+			if s.tls != nil && !secure {
+				writeReply(w, "538 5.7.11 Encryption required for requested authentication mechanism")
+				continue
+			}
 			if err := s.authenticate(r, w, arg, &state); err != nil {
 				logging.Log.Warn().Err(err).Str("remote", remote).Msg("SMTP authentication failed")
 			}
@@ -317,12 +324,12 @@ func (s *Server) maxMessageBytes() int64 {
 	}
 	return defaultMaxMessageBytes
 }
-func (s *Server) writeGreeting(w *bufio.Writer, authenticated bool) {
+func (s *Server) writeGreeting(w *bufio.Writer, authenticated, secure bool) {
 	writeReply(w, "250-ElecPostal")
 	if s.tls != nil && strings.EqualFold(s.cfg.TLSMode, "starttls") {
 		writeReply(w, "250-STARTTLS")
 	}
-	if !authenticated {
+	if !authenticated && (secure || s.tls == nil) {
 		writeReply(w, "250-AUTH PLAIN LOGIN")
 	}
 	writeReply(w, "250 SIZE "+fmt.Sprint(s.maxMessageBytes()))
