@@ -113,7 +113,7 @@ func New(cfg *config.Config) (*App, error) {
 		logging.Log.Info().Str("target", cfg.Workspace.Target).Msg("workspace quota provider configured")
 	}
 	router := server.NewRouter(cfg, emailSvc)
-	smtpConfigs := []config.ListenerConfig{cfg.Mail.SMTP, cfg.Mail.Submission}
+	smtpConfigs := cfg.Mail.SMTP
 	smtpSrvs := make([]*smtp.Server, 0, len(smtpConfigs))
 	for _, listener := range smtpConfigs {
 		smtpSrv, err := smtp.New(listener, cfg.Mail.Domain, emailSvc)
@@ -224,8 +224,7 @@ func (a *App) Start(ctx context.Context) error {
 	logging.Log.Info().
 		Str("http", a.cfg.HTTP.Port).
 		Str("grpc", a.cfg.GRPC.Port).
-		Str("smtp", a.cfg.Mail.SMTP.Port).
-		Str("smtp_submission", a.cfg.Mail.Submission.Port).
+		Int("smtp_listener_count", len(a.cfg.Mail.SMTP)).
 		Msg("elecpostal started")
 	return nil
 }

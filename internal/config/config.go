@@ -86,10 +86,9 @@ type WorkspaceConfig struct {
 type MailConfig struct {
 	Domain     string               `mapstructure:"domain"`
 	Relay      RelayConfig          `mapstructure:"relay"`
-	SMTP       ListenerConfig       `mapstructure:"smtp"`
-	Submission ListenerConfig       `mapstructure:"submission"`
-	IMAP       ListenerConfig       `mapstructure:"imap"`
-	POP3       ListenerConfig       `mapstructure:"pop3"`
+	SMTP       []ListenerConfig     `mapstructure:"smtp"`
+	IMAP       []ListenerConfig     `mapstructure:"imap"`
+	POP3       []ListenerConfig     `mapstructure:"pop3"`
 	SendLimits MailSendLimitsConfig `mapstructure:"sendLimits"`
 }
 
@@ -195,19 +194,6 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("mail.relay.adapter", "")
 	v.SetDefault("mail.relay.port", "587")
 	v.SetDefault("mail.relay.tlsMode", "starttls")
-	v.SetDefault("mail.smtp.port", "25")
-	v.SetDefault("mail.smtp.tlsMode", "starttls")
-	v.SetDefault("mail.smtp.maxMessageBytes", 25*1024*1024)
-	v.SetDefault("mail.smtp.maxRecipients", 100)
-	v.SetDefault("mail.submission.port", "587")
-	v.SetDefault("mail.submission.tlsMode", "starttls")
-	v.SetDefault("mail.submission.maxMessageBytes", 25*1024*1024)
-	v.SetDefault("mail.submission.maxRecipients", 100)
-	v.SetDefault("mail.submission.requireAuth", true)
-	v.SetDefault("mail.imap.port", "143")
-	v.SetDefault("mail.imap.tlsMode", "starttls")
-	v.SetDefault("mail.pop3.port", "110")
-	v.SetDefault("mail.pop3.tlsMode", "starttls")
 	v.SetDefault("ring.target", "")
 	v.SetDefault("ring.useTLS", false)
 	v.SetDefault("ring.tlsSkipVerify", false)

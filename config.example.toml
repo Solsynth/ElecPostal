@@ -68,7 +68,7 @@ tlsMode = "starttls"       # direct-smtp: starttls or required; listener modes: 
 tlsHost = ""               # optional TLS server-name override
 tlsSkipVerify = false
 
-[mail.smtp]
+[[mail.smtp]]
 enabled = true
 host = ""
 port = "25"                # public inbound MX listener; accepts local recipients only
@@ -78,7 +78,7 @@ keyFile = ""
 maxMessageBytes = 26214400
 maxRecipients = 100
 
-[mail.submission]
+[[mail.smtp]]
 enabled = true
 host = ""
 port = "587"               # authenticated client submission
@@ -89,7 +89,18 @@ maxMessageBytes = 26214400
 maxRecipients = 100
 requireAuth = true
 
-[mail.imap]
+[[mail.smtp]]
+enabled = true
+host = ""
+port = "465"               # authenticated implicit-TLS SMTP submission
+tlsMode = "implicit"
+certFile = ""
+keyFile = ""
+maxMessageBytes = 26214400
+maxRecipients = 100
+requireAuth = true
+
+[[mail.imap]]
 enabled = true
 host = ""
 port = "143"               # use 993 for implicit TLS
@@ -97,7 +108,7 @@ tlsMode = "starttls"
 certFile = ""
 keyFile = ""
 
-[mail.pop3]
+[[mail.pop3]]
 enabled = true
 host = ""
 port = "110"               # use 995 for implicit TLS
