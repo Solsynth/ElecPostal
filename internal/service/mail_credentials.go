@@ -130,7 +130,7 @@ func (s *EmailService) AuthenticateMailProtocol(ctx context.Context, accountID u
 // checking its owner's protocol-scoped app passwords.
 func (s *EmailService) AuthenticateMailProtocolAddress(ctx context.Context, address, secret, protocol string) (*ProtocolPrincipal, error) {
 	var mailbox database.Mailbox
-	if err := s.db.WithContext(ctx).Where("address = ?", strings.ToLower(strings.TrimSpace(address))).First(&mailbox).Error; err != nil {
+	if err := s.db.WithContext(ctx).Where("LOWER(address) IN ?", s.mailboxLoginCandidates(address)).First(&mailbox).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrForbidden
 		}

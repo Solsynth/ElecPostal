@@ -204,9 +204,11 @@ func (s *EmailService) ResolveLocalMailbox(ctx context.Context, address string) 
 	var mailbox database.Mailbox
 	query := s.db.WithContext(ctx)
 	if localPart == "postmaster" {
-		query = query.Where("is_default = ? AND LOWER(address) LIKE ?", true, "%@"+s.domain).Order("created_at ASC")
+		// Legacy mailboxes store only their local-part. Full-address rows must
+		// still belong to the configured domain before becoming postmaster.
+		query = query.Where("is_default = ? AND (LOWER(address) NOT LIKE ? OR LOWER(address) LIKE ?)", true, "%@%", "%@"+s.domain).Order("created_at ASC")
 	} else {
-		query = query.Where("LOWER(address) = ?", address)
+		query = query.Where("LOWER(address) IN ?", []string{address, localPart})
 	}
 	if err := query.First(&mailbox).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -215,6 +217,16 @@ func (s *EmailService) ResolveLocalMailbox(ctx context.Context, address string) 
 		return nil, err
 	}
 	return &mailbox, nil
+}
+
+// mailboxLoginCandidates supports legacy mailbox rows containing only a
+// local-part while retaining the canonical full-address form for new rows.
+func (s *EmailService) mailboxLoginCandidates(address string) []string {
+	address = strings.ToLower(strings.TrimSpace(address))
+	if at := strings.LastIndex(address, "@"); at > 0 && at < len(address)-1 && s.domain != "" && address[at+1:] == s.domain {
+		return []string{address, address[:at]}
+	}
+	return []string{address}
 }
 
 // normalizeFromAddress returns a full email address for the mailbox. When the
@@ -965,12 +977,9 @@ func (s *EmailService) DeliverLocal(ctx context.Context, message relay.Message, 
 		}
 		delivered[address] = struct{}{}
 
-		var mailbox database.Mailbox
-		if err := s.db.WithContext(ctx).Where("LOWER(address) = ?", address).First(&mailbox).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return fmt.Errorf("local recipient %q: %w", recipient, ErrNotFound)
-			}
-			return err
+		mailbox, err := s.ResolveLocalMailbox(ctx, address)
+		if err != nil {
+			return fmt.Errorf("local recipient %q: %w", recipient, err)
 		}
 		if _, err := s.ReceiveEmail(ctx, ReceiveEmailInput{
 			MailboxID:   mailbox.ID,
