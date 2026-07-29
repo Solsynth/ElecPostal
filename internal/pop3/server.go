@@ -98,7 +98,9 @@ func (s *Server) serve(raw net.Conn) {
 		}
 		secure = true
 	}
-	defer conn.Close()
+	// STLS replaces conn during the session; close the active wrapper so clients
+	// receive the TLS close_notify alert on a normal QUIT.
+	defer func() { _ = conn.Close() }()
 	r, w := bufio.NewReader(conn), bufio.NewWriter(conn)
 	reply(w, "+OK ElecPostal POP3 ready")
 	var user string

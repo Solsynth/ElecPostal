@@ -92,7 +92,9 @@ func (s *Server) serve(conn net.Conn) {
 		conn = tlsConn
 		secure = true
 	}
-	defer conn.Close()
+	// conn may be replaced by STARTTLS below; defer a closure so the active TLS
+	// connection emits close_notify instead of abruptly closing the raw socket.
+	defer func() { _ = conn.Close() }()
 	r, w := bufio.NewReader(conn), bufio.NewWriter(conn)
 	out(w, "* OK ElecPostal IMAP4rev1 ready")
 	var principal *service.ProtocolPrincipal
