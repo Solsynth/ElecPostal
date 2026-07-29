@@ -408,10 +408,20 @@ func envelopeAddress(arg, prefix string, permitEmpty bool) (string, error) {
 		return "", errors.New("missing prefix")
 	}
 	value := strings.TrimSpace(arg[len(prefix):])
-	if !strings.HasPrefix(value, "<") || !strings.HasSuffix(value, ">") {
+	if !strings.HasPrefix(value, "<") {
 		return "", errors.New("invalid path")
 	}
-	value = strings.TrimSpace(value[1 : len(value)-1])
+	end := strings.IndexByte(value, '>')
+	if end < 0 {
+		return "", errors.New("invalid path")
+	}
+	// RFC 5321 permits ESMTP parameters after the reverse/forward path (for
+	// example, Outlook sends "SIZE=1234" with MAIL FROM). This server does
+	// not use those parameters yet, but must accept a whitespace-separated list.
+	if rest := value[end+1:]; rest != "" && rest[0] != ' ' && rest[0] != '\t' {
+		return "", errors.New("invalid path parameters")
+	}
+	value = strings.TrimSpace(value[1:end])
 	if value == "" && permitEmpty {
 		return "<>", nil
 	}

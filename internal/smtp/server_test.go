@@ -126,6 +126,20 @@ func TestSMTPValidLocalMailbox(t *testing.T) {
 	}
 }
 
+func TestSMTPAcceptsESMTPEnvelopeParameters(t *testing.T) {
+	box := &database.Mailbox{ID: "alice"}
+	backend := &fakeBackend{mailboxes: map[string]*database.Mailbox{"alice@example.test": box}}
+	r, w, conn := newSession(t, backend, "25")
+	defer conn.Close()
+	_ = command(t, r, w, "EHLO outlook.example")
+	if got := command(t, r, w, "MAIL FROM:<sender@remote.test> SIZE=1234"); !strings.HasPrefix(got, "250") {
+		t.Fatalf("MAIL FROM with SIZE parameter: %q", got)
+	}
+	if got := command(t, r, w, "RCPT TO:<alice@example.test> NOTIFY=SUCCESS,FAILURE"); !strings.HasPrefix(got, "250") {
+		t.Fatalf("RCPT TO with ESMTP parameter: %q", got)
+	}
+}
+
 func TestSMTPUnknownAndExternalRecipientsRejected(t *testing.T) {
 	backend := &fakeBackend{mailboxes: map[string]*database.Mailbox{}}
 	r, w, conn := newSession(t, backend, "25")
