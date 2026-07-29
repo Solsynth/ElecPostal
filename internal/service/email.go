@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 
 	"src.solsynth.dev/sosys/elecpostal/internal/database"
@@ -82,17 +83,18 @@ type IncomingAttachment struct {
 // MailboxID identifies the local destination; ownership is never supplied by
 // the caller and is always resolved from that mailbox.
 type ReceiveEmailInput struct {
-	MailboxID   string
-	ThreadID    string
-	FromAddress string
-	FromName    string
-	Subject     string
-	Body        string
-	ContentType string
-	To          []RecipientInput
-	Cc          []RecipientInput
-	Attachments []IncomingAttachment
-	SentAt      *time.Time
+	MailboxID      string
+	ThreadID       string
+	FromAddress    string
+	FromName       string
+	Subject        string
+	Body           string
+	ContentType    string
+	To             []RecipientInput
+	Cc             []RecipientInput
+	Attachments    []IncomingAttachment
+	SentAt         *time.Time
+	Authentication datatypes.JSON
 }
 
 // ListInput is pagination for list endpoints.
@@ -1044,15 +1046,16 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 	}
 
 	email := database.Email{
-		AccountID:   mailbox.AccountID,
-		MailboxID:   mailbox.ID,
-		Subject:     input.Subject,
-		Body:        input.Body,
-		FromAddress: input.FromAddress,
-		FromName:    input.FromName,
-		SentAt:      input.SentAt,
-		Folder:      folderInbox,
-		ContentType: normalizeContentType(input.ContentType),
+		AccountID:      mailbox.AccountID,
+		MailboxID:      mailbox.ID,
+		Subject:        input.Subject,
+		Body:           input.Body,
+		FromAddress:    input.FromAddress,
+		FromName:       input.FromName,
+		SentAt:         input.SentAt,
+		Folder:         folderInbox,
+		ContentType:    normalizeContentType(input.ContentType),
+		Authentication: input.Authentication,
 	}
 	threadID := strings.TrimSpace(input.ThreadID)
 	if threadID == "" {

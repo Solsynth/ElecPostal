@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
+	"gorm.io/datatypes"
 
 	"src.solsynth.dev/sosys/elecpostal/internal/config"
 	"src.solsynth.dev/sosys/elecpostal/internal/logging"
@@ -18,18 +19,19 @@ import (
 )
 
 type deliveryJob struct {
-	ID          string                   `json:"id"`
-	MessageID   string                   `json:"message_id"`
-	FromAddress string                   `json:"from_address"`
-	FromName    string                   `json:"from_name"`
-	Subject     string                   `json:"subject"`
-	Body        string                   `json:"body"`
-	ContentType string                   `json:"content_type"`
-	To          []service.RecipientInput `json:"to"`
-	Cc          []service.RecipientInput `json:"cc"`
-	Recipients  []recipient              `json:"recipients"`
-	Attachments []queuedAttachment       `json:"attachments"`
-	ReceivedAt  time.Time                `json:"received_at"`
+	ID             string                   `json:"id"`
+	MessageID      string                   `json:"message_id"`
+	FromAddress    string                   `json:"from_address"`
+	FromName       string                   `json:"from_name"`
+	Subject        string                   `json:"subject"`
+	Body           string                   `json:"body"`
+	ContentType    string                   `json:"content_type"`
+	To             []service.RecipientInput `json:"to"`
+	Cc             []service.RecipientInput `json:"cc"`
+	Recipients     []recipient              `json:"recipients"`
+	Attachments    []queuedAttachment       `json:"attachments"`
+	Authentication datatypes.JSON           `json:"authentication,omitempty"`
+	ReceivedAt     time.Time                `json:"received_at"`
 }
 
 type queuedAttachment struct {
@@ -169,7 +171,7 @@ func deliverJob(ctx context.Context, backend Backend, job deliveryJob) error {
 		for _, attachment := range job.Attachments {
 			attachments = append(attachments, service.IncomingAttachment{Filename: attachment.Filename, MimeType: attachment.MimeType, Size: int64(len(attachment.Content)), Content: bytes.NewReader(attachment.Content)})
 		}
-		if _, err := backend.ReceiveEmail(ctx, service.ReceiveEmailInput{MailboxID: recipient.mailboxID, FromAddress: job.FromAddress, FromName: job.FromName, Subject: job.Subject, Body: job.Body, ContentType: job.ContentType, To: job.To, Cc: job.Cc, Attachments: attachments, SentAt: &job.ReceivedAt}); err != nil {
+		if _, err := backend.ReceiveEmail(ctx, service.ReceiveEmailInput{MailboxID: recipient.mailboxID, FromAddress: job.FromAddress, FromName: job.FromName, Subject: job.Subject, Body: job.Body, ContentType: job.ContentType, To: job.To, Cc: job.Cc, Attachments: attachments, SentAt: &job.ReceivedAt, Authentication: job.Authentication}); err != nil {
 			return err
 		}
 	}

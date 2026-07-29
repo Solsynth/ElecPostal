@@ -123,6 +123,31 @@ and draft count plus a count by delivery state.
 
 Returns the email with its mailbox, recipients, and attachments.
 
+Inbound messages can include an `authentication` JSON object. Clients should
+show its `warnings` as a persistent sender-safety badge, including when the
+message is moved out of Spam. It is server-generated metadata and must not be
+accepted from `POST /api/emails`.
+
+```json
+{
+  "authentication": {
+    "spf": "fail",
+    "dkim": "fail",
+    "score": 80,
+    "warnings": [
+      "Possible phishing: SPF verification failed",
+      "Possible forgery: DKIM signature is invalid"
+    ]
+  }
+}
+```
+
+`spf` and `dkim` may be `pass`, `fail`, `softfail`, `none`, `temperror`, or
+`permerror` when evaluated. A missing record (`none`) or temporary DNS failure
+does not by itself move mail to Spam, but may increase `score`. Explicit
+verification failures are retained in Spam and do not trigger push
+notifications.
+
 ### Conversations
 
 `GET /api/threads?folder=inbox&offset=0&take=20` returns one summary per
@@ -220,8 +245,9 @@ Move a message explicitly with `POST /api/emails/{email-id}/move`:
 
 `POST /api/emails/{email-id}/spam` moves a message to Spam, while
 `POST /api/emails/{email-id}/not-spam` restores it to Inbox. Incoming mail that
-matches a block rule or the built-in conservative spam heuristic is retained in
-Spam for review.
+matches a block rule, fails sender authentication, or matches the built-in
+conservative spam heuristic is retained in Spam for review. Authentication
+warnings remain attached to the message after it is restored to Inbox.
 
 ### Scheduled and HTML email
 

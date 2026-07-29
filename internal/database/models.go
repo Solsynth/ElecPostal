@@ -34,28 +34,29 @@ func (m *Mailbox) BeforeCreate(tx *gorm.DB) error {
 
 // Email stores a single email message.
 type Email struct {
-	ID                    string     `gorm:"primaryKey;size:36" json:"id"`
-	AccountID             uuid.UUID  `gorm:"index:idx_emails_account_id" json:"account_id"`
-	MailboxID             string     `gorm:"index:idx_emails_mailbox_id;size:36" json:"mailbox_id"`
-	ThreadID              *string    `gorm:"index:idx_emails_thread_id;size:36" json:"thread_id,omitempty"`
-	Subject               string     `gorm:"size:512" json:"subject"`
-	Body                  string     `gorm:"type:text" json:"body"`
-	FromAddress           string     `gorm:"size:255" json:"from_address"`
-	FromName              string     `gorm:"size:128" json:"from_name"`
-	IsRead                bool       `json:"is_read"`
-	IsStarred             bool       `json:"is_starred"`
-	IsDraft               bool       `gorm:"index:idx_emails_is_draft" json:"is_draft"`
-	Folder                string     `gorm:"index:idx_emails_folder;size:16" json:"folder"`
-	ContentType           string     `gorm:"size:32" json:"content_type"`
-	ScheduledAt           *time.Time `gorm:"index" json:"scheduled_at,omitempty"`
-	TrashedAt             *time.Time `gorm:"index" json:"trashed_at,omitempty"`
-	SpamAt                *time.Time `gorm:"index" json:"spam_at,omitempty"`
-	SentAt                *time.Time `json:"sent_at,omitempty"`
-	DeliveryStatus        string     `gorm:"index;size:32" json:"delivery_status"`
-	DeliveryAttempts      int        `json:"delivery_attempts"`
-	LastDeliveryAttemptAt *time.Time `json:"last_delivery_attempt_at,omitempty"`
-	DeliveryError         *string    `gorm:"type:text" json:"delivery_error,omitempty"`
-	ProviderMessageID     *string    `gorm:"size:255" json:"provider_message_id,omitempty"`
+	ID                    string         `gorm:"primaryKey;size:36" json:"id"`
+	AccountID             uuid.UUID      `gorm:"index:idx_emails_account_id" json:"account_id"`
+	MailboxID             string         `gorm:"index:idx_emails_mailbox_id;size:36" json:"mailbox_id"`
+	ThreadID              *string        `gorm:"index:idx_emails_thread_id;size:36" json:"thread_id,omitempty"`
+	Subject               string         `gorm:"size:512" json:"subject"`
+	Body                  string         `gorm:"type:text" json:"body"`
+	FromAddress           string         `gorm:"size:255" json:"from_address"`
+	FromName              string         `gorm:"size:128" json:"from_name"`
+	IsRead                bool           `json:"is_read"`
+	IsStarred             bool           `json:"is_starred"`
+	IsDraft               bool           `gorm:"index:idx_emails_is_draft" json:"is_draft"`
+	Folder                string         `gorm:"index:idx_emails_folder;size:16" json:"folder"`
+	ContentType           string         `gorm:"size:32" json:"content_type"`
+	ScheduledAt           *time.Time     `gorm:"index" json:"scheduled_at,omitempty"`
+	TrashedAt             *time.Time     `gorm:"index" json:"trashed_at,omitempty"`
+	SpamAt                *time.Time     `gorm:"index" json:"spam_at,omitempty"`
+	SentAt                *time.Time     `json:"sent_at,omitempty"`
+	DeliveryStatus        string         `gorm:"index;size:32" json:"delivery_status"`
+	DeliveryAttempts      int            `json:"delivery_attempts"`
+	LastDeliveryAttemptAt *time.Time     `json:"last_delivery_attempt_at,omitempty"`
+	DeliveryError         *string        `gorm:"type:text" json:"delivery_error,omitempty"`
+	ProviderMessageID     *string        `gorm:"size:255" json:"provider_message_id,omitempty"`
+	Authentication        datatypes.JSON `gorm:"type:jsonb" json:"authentication,omitempty"`
 	// RawSizeBytes is the byte size of the message data kept in ElecPostal's
 	// database. Attachment content is stored and accounted for by DysonFS, so
 	// it is deliberately excluded from this value.
