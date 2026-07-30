@@ -63,6 +63,7 @@ type AttachmentInput struct {
 // SendEmailInput is the payload for sending an email.
 type SendEmailInput struct {
 	MailboxID     string           `json:"mailbox_id" binding:"required"`
+	FromAliasID   string           `json:"from_alias_id,omitempty"`
 	ThreadID      string           `json:"thread_id,omitempty"`
 	ReplyToID     string           `json:"reply_to_id,omitempty"`
 	To            []RecipientInput `json:"to" binding:"required,min=1"`
@@ -157,12 +158,20 @@ type CreateBlockRuleInput struct {
 	Pattern     string `json:"pattern" binding:"required"`
 }
 
-// CreateMailConnectionInput begins verification of an SES sending identity for
-// a workspace. Identity may be a domain or one email address.
-type CreateMailConnectionInput struct {
+type CreateCustomDomainInput struct {
 	WorkspaceID string `json:"workspace_id" binding:"required"`
-	Provider    string `json:"provider" binding:"required"`
-	Identity    string `json:"identity" binding:"required"`
+	Domain      string `json:"domain" binding:"required"`
+}
+
+type CreateMailboxAliasInput struct {
+	CustomDomainID string `json:"custom_domain_id" binding:"required"`
+	LocalPart      string `json:"local_part" binding:"required"`
+	Name           string `json:"name"`
+}
+
+type CreateMailForwardingInput struct {
+	AliasID     string `json:"alias_id" binding:"required"`
+	Destination string `json:"destination" binding:"required"`
 }
 
 const (
@@ -231,6 +240,16 @@ func (s *EmailService) MailHost() string {
 // a normal mailbox address.
 func (s *EmailService) ResolveLocalMailbox(ctx context.Context, address string) (*database.Mailbox, error) {
 	address = strings.ToLower(strings.TrimSpace(address))
+	var alias database.MailboxAlias
+	if err := s.db.WithContext(ctx).Where("LOWER(address) = ?", address).First(&alias).Error; err == nil {
+		var mailbox database.Mailbox
+		if err := s.db.WithContext(ctx).Where("id = ?", alias.MailboxID).First(&mailbox).Error; err != nil {
+			return nil, err
+		}
+		return &mailbox, nil
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
 	at := strings.LastIndex(address, "@")
 	if at <= 0 || at == len(address)-1 || s.domain == "" || address[at+1:] != s.domain {
 		return nil, ErrNotFound
@@ -349,52 +368,46 @@ func (s *EmailService) ListMailboxes(ctx context.Context, accountID uuid.UUID, w
 	return items, nil
 }
 
-// CreateMailConnection provisions a workspace-owned SES identity. Credentials
+// CreateCustomDomain provisions a workspace-owned SES domain. Credentials
 // remain server-side in the AWS SDK provider chain and are never accepted from
 // HTTP clients or written to this service's database.
-func (s *EmailService) CreateMailConnection(ctx context.Context, accountID uuid.UUID, input CreateMailConnectionInput) (*database.MailConnection, error) {
+func (s *EmailService) CreateCustomDomain(ctx context.Context, accountID uuid.UUID, input CreateCustomDomainInput) (*database.CustomDomain, error) {
 	if s.identities == nil {
 		return nil, relay.ErrIdentityManagementUnavailable
-	}
-	if strings.ToLower(strings.TrimSpace(input.Provider)) != "ses" {
-		return nil, fmt.Errorf("provider must be ses")
 	}
 	if err := s.authorizeWorkspaceMember(ctx, strings.TrimSpace(input.WorkspaceID), accountID); err != nil {
 		return nil, err
 	}
-	identity, err := normalizeSendingIdentity(input.Identity)
+	domain, err := normalizeCustomDomain(input.Domain)
 	if err != nil {
 		return nil, err
 	}
-	var existing database.MailConnection
-	err = s.db.WithContext(ctx).Where("workspace_id = ? AND provider = ? AND identity = ?", input.WorkspaceID, "ses", identity).First(&existing).Error
+	var existing database.CustomDomain
+	err = s.db.WithContext(ctx).Where("workspace_id = ? AND provider = ? AND domain = ?", input.WorkspaceID, "ses", domain).First(&existing).Error
 	if err == nil {
-		return s.refreshMailConnection(ctx, &existing)
+		return s.refreshCustomDomain(ctx, &existing)
 	}
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, err
 	}
-	status, err := s.identities.CreateIdentity(ctx, identity)
+	status, err := s.identities.CreateIdentity(ctx, domain)
 	if err != nil {
 		return nil, err
 	}
-	// Never let a workspace claim an already-verified account-wide SES identity
-	// that was not created through its own connection record. This prevents a
-	// tenant from discovering and using another tenant's sender identity.
+	// Never let a workspace claim an already-verified account-wide SES domain
+	// that was not created through its own record.
 	if status.VerifiedForSendingStatus {
-		return nil, fmt.Errorf("SES identity already exists; contact an administrator to associate it")
+		return nil, fmt.Errorf("SES custom domain already exists; contact an administrator to associate it")
 	}
-	connection := database.MailConnection{WorkspaceID: strings.TrimSpace(input.WorkspaceID), Provider: "ses", Identity: identity}
-	applyIdentityStatus(&connection, status)
-	if err := s.db.WithContext(ctx).Create(&connection).Error; err != nil {
+	customDomain := database.CustomDomain{WorkspaceID: strings.TrimSpace(input.WorkspaceID), Provider: "ses", Domain: domain}
+	applyCustomDomainStatus(&customDomain, status)
+	if err := s.db.WithContext(ctx).Create(&customDomain).Error; err != nil {
 		return nil, err
 	}
-	return &connection, nil
+	return &customDomain, nil
 }
 
-// ListMailConnections returns sending identities in one workspace. Membership
-// is checked even though identity status itself is public DNS metadata.
-func (s *EmailService) ListMailConnections(ctx context.Context, accountID uuid.UUID, workspaceID string) ([]database.MailConnection, error) {
+func (s *EmailService) ListCustomDomains(ctx context.Context, accountID uuid.UUID, workspaceID string) ([]database.CustomDomain, error) {
 	workspaceID = strings.TrimSpace(workspaceID)
 	if workspaceID == "" {
 		return nil, fmt.Errorf("workspace_id is required")
@@ -402,93 +415,94 @@ func (s *EmailService) ListMailConnections(ctx context.Context, accountID uuid.U
 	if err := s.authorizeWorkspaceMember(ctx, workspaceID, accountID); err != nil {
 		return nil, err
 	}
-	var connections []database.MailConnection
-	if err := s.db.WithContext(ctx).Where("workspace_id = ?", workspaceID).Order("created_at DESC").Find(&connections).Error; err != nil {
+	var domains []database.CustomDomain
+	if err := s.db.WithContext(ctx).Where("workspace_id = ?", workspaceID).Order("created_at DESC").Find(&domains).Error; err != nil {
 		return nil, err
 	}
-	return connections, nil
+	return domains, nil
 }
 
-// RefreshMailConnection updates persisted verification status from SES.
-func (s *EmailService) RefreshMailConnection(ctx context.Context, accountID uuid.UUID, connectionID string) (*database.MailConnection, error) {
+func (s *EmailService) RefreshCustomDomain(ctx context.Context, accountID uuid.UUID, domainID string) (*database.CustomDomain, error) {
 	if s.identities == nil {
 		return nil, relay.ErrIdentityManagementUnavailable
 	}
-	var connection database.MailConnection
-	if err := s.db.WithContext(ctx).Where("id = ?", connectionID).First(&connection).Error; err != nil {
+	var domain database.CustomDomain
+	if err := s.db.WithContext(ctx).Where("id = ?", domainID).First(&domain).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrNotFound
 		}
 		return nil, err
 	}
-	if err := s.authorizeWorkspaceMember(ctx, connection.WorkspaceID, accountID); err != nil {
+	if err := s.authorizeWorkspaceMember(ctx, domain.WorkspaceID, accountID); err != nil {
 		return nil, err
 	}
-	return s.refreshMailConnection(ctx, &connection)
+	return s.refreshCustomDomain(ctx, &domain)
 }
 
-// DeleteMailConnection deletes the remote SES identity and then its local
-// record. A connection is scoped to one workspace, so identities cannot be
-// removed by members of other workspaces.
-func (s *EmailService) DeleteMailConnection(ctx context.Context, accountID uuid.UUID, connectionID string) error {
+// DeleteCustomDomain deletes the remote SES domain and then its local record.
+func (s *EmailService) DeleteCustomDomain(ctx context.Context, accountID uuid.UUID, domainID string) error {
 	if s.identities == nil {
 		return relay.ErrIdentityManagementUnavailable
 	}
-	var connection database.MailConnection
-	if err := s.db.WithContext(ctx).Where("id = ?", connectionID).First(&connection).Error; err != nil {
+	var domain database.CustomDomain
+	if err := s.db.WithContext(ctx).Where("id = ?", domainID).First(&domain).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return ErrNotFound
 		}
 		return err
 	}
-	if err := s.authorizeWorkspaceMember(ctx, connection.WorkspaceID, accountID); err != nil {
+	if err := s.authorizeWorkspaceMember(ctx, domain.WorkspaceID, accountID); err != nil {
 		return err
 	}
 	var otherCount int64
-	if err := s.db.WithContext(ctx).Model(&database.MailConnection{}).Where("provider = ? AND identity = ? AND id <> ?", connection.Provider, connection.Identity, connection.ID).Count(&otherCount).Error; err != nil {
+	if err := s.db.WithContext(ctx).Model(&database.CustomDomain{}).Where("provider = ? AND domain = ? AND id <> ?", domain.Provider, domain.Domain, domain.ID).Count(&otherCount).Error; err != nil {
 		return err
 	}
 	if otherCount > 0 {
-		return fmt.Errorf("identity is also connected to another workspace")
+		return fmt.Errorf("custom domain is also connected to another workspace")
 	}
-	if err := s.identities.DeleteIdentity(ctx, connection.Identity); err != nil {
+	var aliasCount int64
+	if err := s.db.WithContext(ctx).Model(&database.MailboxAlias{}).Where("custom_domain_id = ?", domain.ID).Count(&aliasCount).Error; err != nil {
 		return err
 	}
-	return s.db.WithContext(ctx).Delete(&connection).Error
+	if aliasCount > 0 {
+		return fmt.Errorf("custom domain still has mailbox aliases")
+	}
+	if err := s.identities.DeleteIdentity(ctx, domain.Domain); err != nil {
+		return err
+	}
+	return s.db.WithContext(ctx).Delete(&domain).Error
 }
 
-func (s *EmailService) refreshMailConnection(ctx context.Context, connection *database.MailConnection) (*database.MailConnection, error) {
-	status, err := s.identities.GetIdentity(ctx, connection.Identity)
+func (s *EmailService) refreshCustomDomain(ctx context.Context, domain *database.CustomDomain) (*database.CustomDomain, error) {
+	status, err := s.identities.GetIdentity(ctx, domain.Domain)
 	if err != nil {
 		return nil, err
 	}
-	applyIdentityStatus(connection, status)
-	if err := s.db.WithContext(ctx).Save(connection).Error; err != nil {
+	applyCustomDomainStatus(domain, status)
+	if err := s.db.WithContext(ctx).Save(domain).Error; err != nil {
 		return nil, err
 	}
-	return connection, nil
+	return domain, nil
 }
 
-func applyIdentityStatus(connection *database.MailConnection, status relay.IdentityStatus) {
-	connection.IdentityType = status.IdentityType
-	connection.VerificationStatus = status.VerificationStatus
-	connection.VerifiedForSendingStatus = status.VerifiedForSendingStatus
-	connection.DKIMStatus = status.DKIMStatus
+func applyCustomDomainStatus(domain *database.CustomDomain, status relay.IdentityStatus) {
+	domain.DomainType = status.IdentityType
+	domain.VerificationStatus = status.VerificationStatus
+	domain.VerifiedForSendingStatus = status.VerifiedForSendingStatus
+	domain.DKIMStatus = status.DKIMStatus
 	records, _ := json.Marshal(status.DNSRecords)
-	connection.DNSRecords = datatypes.JSON(records)
+	domain.DNSRecords = datatypes.JSON(records)
 }
 
-func normalizeSendingIdentity(value string) (string, error) {
+func normalizeCustomDomain(value string) (string, error) {
 	value = strings.ToLower(strings.TrimSpace(value))
-	if parsed, err := mail.ParseAddress(value); err == nil && parsed.Address == value {
-		return value, nil
-	}
 	if strings.Contains(value, "@") {
-		return "", fmt.Errorf("identity must be a valid email address or domain")
+		return "", fmt.Errorf("domain must not include an email address")
 	}
 	parsed, err := url.Parse("https://" + value)
 	if err != nil || parsed.Host != value || !strings.Contains(value, ".") {
-		return "", fmt.Errorf("identity must be a valid email address or domain")
+		return "", fmt.Errorf("domain must be valid")
 	}
 	return value, nil
 }
@@ -538,6 +552,125 @@ func (s *EmailService) CreateMailbox(ctx context.Context, accountID uuid.UUID, w
 		return s.ensureProtocolFoldersTx(tx, mailbox.ID)
 	})
 	if err != nil {
+		return nil, err
+	}
+	return &mailbox, nil
+}
+
+func (s *EmailService) ListMailboxAliases(ctx context.Context, accountID uuid.UUID, mailboxID string) ([]database.MailboxAlias, error) {
+	mailbox, err := s.authorizedMailbox(ctx, accountID, mailboxID)
+	if err != nil {
+		return nil, err
+	}
+	var aliases []database.MailboxAlias
+	if err := s.db.WithContext(ctx).Where("mailbox_id = ?", mailbox.ID).Order("address ASC").Find(&aliases).Error; err != nil {
+		return nil, err
+	}
+	return aliases, nil
+}
+
+// CreateMailboxAlias assigns an address on a verified workspace custom domain
+// to a mailbox. The alias can be selected as from_alias_id when sending.
+func (s *EmailService) CreateMailboxAlias(ctx context.Context, accountID uuid.UUID, mailboxID string, input CreateMailboxAliasInput) (*database.MailboxAlias, error) {
+	mailbox, err := s.authorizedMailbox(ctx, accountID, mailboxID)
+	if err != nil {
+		return nil, err
+	}
+	var domain database.CustomDomain
+	if err := s.db.WithContext(ctx).Where("id = ? AND workspace_id = ? AND verified_for_sending_status = ?", input.CustomDomainID, mailbox.WorkspaceID, true).First(&domain).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("verified custom domain not found")
+		}
+		return nil, err
+	}
+	localPart := strings.TrimSpace(strings.ToLower(input.LocalPart))
+	address := localPart + "@" + domain.Domain
+	parsed, err := mail.ParseAddress(address)
+	if err != nil || parsed.Address != address || strings.ContainsAny(localPart, "@<>") {
+		return nil, fmt.Errorf("local_part must form a valid email address")
+	}
+	if _, reserved := reservedMailboxLocalParts[localPart]; reserved {
+		return nil, fmt.Errorf("mailbox local-part %q is reserved", localPart)
+	}
+	if strings.EqualFold(address, s.normalizeFromAddress(mailbox.Address)) {
+		return nil, fmt.Errorf("alias duplicates the mailbox address")
+	}
+	alias := database.MailboxAlias{MailboxID: mailbox.ID, CustomDomainID: domain.ID, Address: address, Name: strings.TrimSpace(input.Name)}
+	if err := s.db.WithContext(ctx).Create(&alias).Error; err != nil {
+		return nil, err
+	}
+	return &alias, nil
+}
+
+func (s *EmailService) DeleteMailboxAlias(ctx context.Context, accountID uuid.UUID, mailboxID, aliasID string) error {
+	mailbox, err := s.authorizedMailbox(ctx, accountID, mailboxID)
+	if err != nil {
+		return err
+	}
+	var forwardingCount int64
+	if err := s.db.WithContext(ctx).Model(&database.MailForwarding{}).Where("alias_id = ?", aliasID).Count(&forwardingCount).Error; err != nil { return err }
+	if forwardingCount > 0 { return fmt.Errorf("alias still has forwarding rules") }
+	result := s.db.WithContext(ctx).Where("id = ? AND mailbox_id = ?", aliasID, mailbox.ID).Delete(&database.MailboxAlias{})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *EmailService) ListMailForwardings(ctx context.Context, accountID uuid.UUID, mailboxID string) ([]database.MailForwarding, error) {
+	mailbox, err := s.authorizedMailbox(ctx, accountID, mailboxID)
+	if err != nil { return nil, err }
+	var forwardings []database.MailForwarding
+	if err := s.db.WithContext(ctx).Where("mailbox_id = ?", mailbox.ID).Order("created_at ASC").Find(&forwardings).Error; err != nil { return nil, err }
+	return forwardings, nil
+}
+
+// CreateMailForwarding sends copies of messages received through an alias to
+// one external address. The original stays in the mailbox.
+func (s *EmailService) CreateMailForwarding(ctx context.Context, accountID uuid.UUID, mailboxID string, input CreateMailForwardingInput) (*database.MailForwarding, error) {
+	mailbox, err := s.authorizedMailbox(ctx, accountID, mailboxID)
+	if err != nil { return nil, err }
+	var alias database.MailboxAlias
+	if err := s.db.WithContext(ctx).Where("id = ? AND mailbox_id = ?", input.AliasID, mailbox.ID).First(&alias).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) { return nil, ErrNotFound }
+		return nil, err
+	}
+	destination, err := normalizeForwardDestination(input.Destination)
+	if err != nil { return nil, err }
+	if strings.EqualFold(destination, alias.Address) { return nil, fmt.Errorf("forward destination cannot be the source alias") }
+	forwarding := database.MailForwarding{MailboxID: mailbox.ID, AliasID: alias.ID, Destination: destination}
+	if err := s.db.WithContext(ctx).Create(&forwarding).Error; err != nil { return nil, err }
+	return &forwarding, nil
+}
+
+func (s *EmailService) DeleteMailForwarding(ctx context.Context, accountID uuid.UUID, mailboxID, forwardingID string) error {
+	mailbox, err := s.authorizedMailbox(ctx, accountID, mailboxID)
+	if err != nil { return err }
+	result := s.db.WithContext(ctx).Where("id = ? AND mailbox_id = ?", forwardingID, mailbox.ID).Delete(&database.MailForwarding{})
+	if result.Error != nil { return result.Error }
+	if result.RowsAffected == 0 { return ErrNotFound }
+	return nil
+}
+
+func normalizeForwardDestination(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	parsed, err := mail.ParseAddress(value)
+	if err != nil || parsed.Address != value { return "", fmt.Errorf("destination must be a valid email address") }
+	return value, nil
+}
+
+func (s *EmailService) authorizedMailbox(ctx context.Context, accountID uuid.UUID, mailboxID string) (*database.Mailbox, error) {
+	var mailbox database.Mailbox
+	if err := s.db.WithContext(ctx).Where("id = ? AND account_id = ?", mailboxID, accountID).First(&mailbox).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	if err := s.authorizeWorkspaceMember(ctx, mailbox.WorkspaceID, accountID); err != nil {
 		return nil, err
 	}
 	return &mailbox, nil
@@ -922,6 +1055,19 @@ func (s *EmailService) SendEmail(ctx context.Context, accountID uuid.UUID, input
 	}
 
 	fromAddress := s.normalizeFromAddress(mailbox.Address)
+	if input.FromAliasID != "" {
+		var alias database.MailboxAlias
+		if err := s.db.WithContext(ctx).Where("id = ? AND mailbox_id = ?", input.FromAliasID, mailbox.ID).First(&alias).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, ErrNotFound
+			}
+			return nil, err
+		}
+		fromAddress = alias.Address
+		if alias.Name != "" {
+			mailbox.Name = alias.Name
+		}
+	}
 	if !input.IsDraft {
 		if err := s.ensureMailboxSendingIdentity(ctx, mailbox, fromAddress); err != nil {
 			return nil, err
@@ -1020,7 +1166,7 @@ func (s *EmailService) SendEmail(ctx context.Context, accountID uuid.UUID, input
 // ensureMailboxSendingIdentity keeps SES's account-wide identity namespace
 // from bypassing workspace ownership. The service's canonical mail host stays
 // available for its existing operator-managed identity; other addresses need a
-// verified workspace connection for the exact address or its domain.
+// verified workspace custom domain for its domain.
 func (s *EmailService) ensureMailboxSendingIdentity(ctx context.Context, mailbox database.Mailbox, fromAddress string) error {
 	if s.identities == nil {
 		return nil
@@ -1033,13 +1179,13 @@ func (s *EmailService) ensureMailboxSendingIdentity(ctx context.Context, mailbox
 		return nil
 	}
 	var count int64
-	if err := s.db.WithContext(ctx).Model(&database.MailConnection{}).
-		Where("workspace_id = ? AND provider = ? AND verified_for_sending_status = ? AND identity IN ?", mailbox.WorkspaceID, "ses", true, []string{strings.ToLower(fromAddress), strings.ToLower(parts[1])}).
+	if err := s.db.WithContext(ctx).Model(&database.CustomDomain{}).
+		Where("workspace_id = ? AND provider = ? AND verified_for_sending_status = ? AND domain = ?", mailbox.WorkspaceID, "ses", true, strings.ToLower(parts[1])).
 		Count(&count).Error; err != nil {
 		return err
 	}
 	if count == 0 {
-		return fmt.Errorf("a verified SES connection is required to send from %s", fromAddress)
+		return fmt.Errorf("a verified SES custom domain is required to send from %s", fromAddress)
 	}
 	return nil
 }
@@ -1361,7 +1507,55 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 		}
 	}
 	s.publishMailEvent(ctx, email.AccountID.String(), "mail.created", &email)
+	s.forwardIncomingEmail(ctx, mailbox, email, input.To)
 	return &email, nil
+}
+
+// forwardIncomingEmail is deliberately best-effort: a forwarding failure never
+// rejects the original SMTP delivery. Attachments are not forwarded until a
+// relay attachment byte-source is configured, preventing silent data loss.
+func (s *EmailService) forwardIncomingEmail(ctx context.Context, mailbox database.Mailbox, email database.Email, recipients []RecipientInput) {
+	if s.relay == nil || len(recipients) == 0 || strings.HasPrefix(strings.ToLower(strings.TrimSpace(email.Subject)), "fwd:") { return }
+	addresses := make([]string, 0, len(recipients))
+	for _, recipient := range recipients { addresses = append(addresses, strings.ToLower(strings.TrimSpace(recipient.Address))) }
+	var aliases []database.MailboxAlias
+	if err := s.db.WithContext(ctx).Where("mailbox_id = ? AND LOWER(address) IN ?", mailbox.ID, addresses).Find(&aliases).Error; err != nil || len(aliases) == 0 {
+		if err != nil { logging.Log.Warn().Err(err).Str("email_id", email.ID).Msg("look up forwarding aliases") }
+		return
+	}
+	aliasByID := make(map[string]database.MailboxAlias, len(aliases))
+	aliasIDs := make([]string, 0, len(aliases))
+	for _, alias := range aliases { aliasByID[alias.ID], aliasIDs = alias, append(aliasIDs, alias.ID) }
+	var rules []database.MailForwarding
+	if err := s.db.WithContext(ctx).Where("alias_id IN ?", aliasIDs).Find(&rules).Error; err != nil {
+		logging.Log.Warn().Err(err).Str("email_id", email.ID).Msg("look up mail forwarding rules")
+		return
+	}
+	if len(email.Attachments) > 0 {
+		logging.Log.Warn().Str("email_id", email.ID).Msg("skipped forwarding email with attachments; relay attachment source is unavailable")
+		return
+	}
+	sent := map[string]struct{}{}
+	for _, rule := range rules {
+		alias := aliasByID[rule.AliasID]
+		key := alias.Address + "\x00" + rule.Destination
+		if _, ok := sent[key]; ok { continue }
+		sent[key] = struct{}{}
+		if err := s.ensureMailboxSendingIdentity(ctx, mailbox, alias.Address); err != nil {
+			logging.Log.Warn().Err(err).Str("email_id", email.ID).Str("alias", alias.Address).Msg("skipped forwarding from unverified custom domain")
+			continue
+		}
+		name := alias.Name
+		if name == "" { name = mailbox.Name }
+		message := relay.Message{FromAddress: alias.Address, FromName: name, To: []string{rule.Destination}, Subject: "Fwd: " + email.Subject, Body: forwardedBody(email), ContentType: "text/plain", ThreadID: dereferenceString(email.ThreadID)}
+		if _, err := s.relay.Send(ctx, message); err != nil {
+			logging.Log.Warn().Err(err).Str("email_id", email.ID).Str("destination", rule.Destination).Msg("failed to forward email")
+		}
+	}
+}
+
+func forwardedBody(email database.Email) string {
+	return fmt.Sprintf("Forwarded message from %s\nSubject: %s\n\n%s", email.FromAddress, email.Subject, email.Body)
 }
 
 func (s *EmailService) storeIncomingAttachment(ctx context.Context, mailbox database.Mailbox, attachment IncomingAttachment) (AttachmentInput, error) {

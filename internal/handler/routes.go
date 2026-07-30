@@ -23,6 +23,9 @@ func RegisterRoutes(r *gin.RouterGroup, emailSvc *service.EmailService) {
 		mailboxes.GET("/:id/threads", func(c *gin.Context) { listThreads(c, emailSvc, c.Param("id")) })
 		mailboxes.GET("/:id/stats", func(c *gin.Context) { getMailboxStats(c, emailSvc) })
 		mailboxes.GET("/:id/quota", func(c *gin.Context) { getMailboxQuota(c, emailSvc) })
+		mailboxes.GET("/:id/aliases", func(c *gin.Context) { listMailboxAliases(c, emailSvc) })
+		mailboxes.POST("/:id/aliases", func(c *gin.Context) { createMailboxAlias(c, emailSvc) })
+		mailboxes.DELETE("/:id/aliases/:aliasID", func(c *gin.Context) { deleteMailboxAlias(c, emailSvc) })
 	}
 
 	emails := r.Group("/emails")
@@ -71,21 +74,21 @@ func RegisterRoutes(r *gin.RouterGroup, emailSvc *service.EmailService) {
 		credentials.DELETE("/:id", func(c *gin.Context) { deleteMailCredential(c, emailSvc) })
 	}
 
-	connections := r.Group("/mail-connections")
+	customDomains := r.Group("/custom-domains")
 	{
-		connections.GET("", func(c *gin.Context) { listMailConnections(c, emailSvc) })
-		connections.POST("", func(c *gin.Context) { createMailConnection(c, emailSvc) })
-		connections.POST("/:id/refresh", func(c *gin.Context) { refreshMailConnection(c, emailSvc) })
-		connections.DELETE("/:id", func(c *gin.Context) { deleteMailConnection(c, emailSvc) })
+		customDomains.GET("", func(c *gin.Context) { listCustomDomains(c, emailSvc) })
+		customDomains.POST("", func(c *gin.Context) { createCustomDomain(c, emailSvc) })
+		customDomains.POST("/:id/refresh", func(c *gin.Context) { refreshCustomDomain(c, emailSvc) })
+		customDomains.DELETE("/:id", func(c *gin.Context) { deleteCustomDomain(c, emailSvc) })
 	}
 }
 
-func listMailConnections(c *gin.Context, emailSvc *service.EmailService) {
+func listCustomDomains(c *gin.Context, emailSvc *service.EmailService) {
 	accountID, ok := identity.RequireAccountID(c)
 	if !ok {
 		return
 	}
-	items, err := emailSvc.ListMailConnections(c.Request.Context(), uuid.MustParse(accountID), c.Query("workspace_id"))
+	items, err := emailSvc.ListCustomDomains(c.Request.Context(), uuid.MustParse(accountID), c.Query("workspace_id"))
 	if err != nil {
 		renderServiceError(c, err)
 		return
@@ -93,43 +96,86 @@ func listMailConnections(c *gin.Context, emailSvc *service.EmailService) {
 	c.JSON(http.StatusOK, items)
 }
 
-func createMailConnection(c *gin.Context, emailSvc *service.EmailService) {
+func createCustomDomain(c *gin.Context, emailSvc *service.EmailService) {
 	accountID, ok := identity.RequireAccountID(c)
 	if !ok {
 		return
 	}
-	var input service.CreateMailConnectionInput
+	var input service.CreateCustomDomainInput
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	connection, err := emailSvc.CreateMailConnection(c.Request.Context(), uuid.MustParse(accountID), input)
+	domain, err := emailSvc.CreateCustomDomain(c.Request.Context(), uuid.MustParse(accountID), input)
 	if err != nil {
 		renderServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusCreated, connection)
+	c.JSON(http.StatusCreated, domain)
 }
 
-func refreshMailConnection(c *gin.Context, emailSvc *service.EmailService) {
+func refreshCustomDomain(c *gin.Context, emailSvc *service.EmailService) {
 	accountID, ok := identity.RequireAccountID(c)
 	if !ok {
 		return
 	}
-	connection, err := emailSvc.RefreshMailConnection(c.Request.Context(), uuid.MustParse(accountID), c.Param("id"))
+	domain, err := emailSvc.RefreshCustomDomain(c.Request.Context(), uuid.MustParse(accountID), c.Param("id"))
 	if err != nil {
 		renderServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, connection)
+	c.JSON(http.StatusOK, domain)
 }
 
-func deleteMailConnection(c *gin.Context, emailSvc *service.EmailService) {
+func deleteCustomDomain(c *gin.Context, emailSvc *service.EmailService) {
 	accountID, ok := identity.RequireAccountID(c)
 	if !ok {
 		return
 	}
-	if err := emailSvc.DeleteMailConnection(c.Request.Context(), uuid.MustParse(accountID), c.Param("id")); err != nil {
+	if err := emailSvc.DeleteCustomDomain(c.Request.Context(), uuid.MustParse(accountID), c.Param("id")); err != nil {
+		renderServiceError(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+func listMailboxAliases(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	aliases, err := emailSvc.ListMailboxAliases(c.Request.Context(), uuid.MustParse(accountID), c.Param("id"))
+	if err != nil {
+		renderServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, aliases)
+}
+
+func createMailboxAlias(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	var input service.CreateMailboxAliasInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	alias, err := emailSvc.CreateMailboxAlias(c.Request.Context(), uuid.MustParse(accountID), c.Param("id"), input)
+	if err != nil {
+		renderServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, alias)
+}
+
+func deleteMailboxAlias(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	if err := emailSvc.DeleteMailboxAlias(c.Request.Context(), uuid.MustParse(accountID), c.Param("id"), c.Param("aliasID")); err != nil {
 		renderServiceError(c, err)
 		return
 	}

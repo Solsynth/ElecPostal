@@ -86,8 +86,8 @@ Set `mail.relay.adapter = "ses"` to use the AWS SDK's SES API v2 client.
 Set `mail.relay.region` and authenticate through the AWS SDK default credential
 chain (for example, an IAM role, `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, or
 an AWS shared profile). SES SMTP credentials and `mail.relay.host` are not used
-by this adapter. The same adapter supports workspace-owned custom sending
-identities through `/api/mail-connections`; grant its IAM principal
+by this adapter. The same adapter supports workspace-owned custom domains
+through `/api/custom-domains`; grant its IAM principal
 `ses:CreateEmailIdentity`, `ses:GetEmailIdentity`, and `ses:DeleteEmailIdentity`
 in addition to the send permission. AWS credentials are never sent by clients
 or stored in ElecPostal.

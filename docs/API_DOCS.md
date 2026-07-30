@@ -69,34 +69,33 @@ Creating a mailbox requires the authenticated account to be an active member of
 the selected workspace. Workspace plans allow 1 mailbox on Free, 3 on Pro, and
 10 on Enterprise.
 
-## Custom SES sending identities
+## Custom domains
 
 When the server is configured with `mail.relay.adapter = "ses"`, workspace
-members can connect an SES sending identity without submitting AWS secrets. The
+members can connect an SES custom domain without submitting AWS secrets. The
 service uses its configured AWS SDK credential chain, so the IAM role needs
 `ses:CreateEmailIdentity`, `ses:GetEmailIdentity`, and `ses:DeleteEmailIdentity`.
 
-### Create an identity
+### Add a custom domain
 
-`POST /api/mail-connections`
+`POST /api/custom-domains`
 
 ```json
 {
   "workspace_id": "01J...",
-  "provider": "ses",
-  "identity": "example.com"
+  "domain": "example.com"
 }
 ```
 
-For a domain, the result contains the Easy DKIM CNAME records under
-`dns_records`; publish all of them, then refresh the connection. For an email
-address identity, SES sends its normal confirmation message to that address.
+The result contains the Easy DKIM CNAME records under `dns_records`; publish
+all of them, then refresh the custom domain. Custom domains use SES Easy DKIM
+verification.
 
 ```json
 {
   "id": "01J...",
   "provider": "ses",
-  "identity": "example.com",
+  "domain": "example.com",
   "verification_status": "PENDING",
   "verified_for_sending_status": false,
   "dns_records": [
@@ -105,13 +104,35 @@ address identity, SES sends its normal confirmation message to that address.
 }
 ```
 
-`GET /api/mail-connections?workspace_id={workspace-id}` lists connections.
-`POST /api/mail-connections/{id}/refresh` fetches the latest SES verification
-and DKIM status. `DELETE /api/mail-connections/{id}` removes both the local
-connection and the SES identity; this stops SES sending from that identity.
-Non-draft custom-domain sends require a verified connection in the mailbox's
-workspace (either the exact sender address or its domain). The configured
-canonical `mail.domain` remains an operator-managed identity.
+`GET /api/custom-domains?workspace_id={workspace-id}` lists domains.
+`POST /api/custom-domains/{id}/refresh` fetches the latest SES verification
+and DKIM status. `DELETE /api/custom-domains/{id}` removes the custom domain
+from SES after all of its aliases are removed. Non-draft custom-domain sends
+require a verified custom domain in the mailbox's workspace. The configured
+canonical `mail.domain` remains operator-managed.
+
+### Mailbox aliases
+
+After a custom domain is verified, create an alias for one mailbox:
+
+`POST /api/mailboxes/{mailbox-id}/aliases`
+
+```json
+{
+  "custom_domain_id": "01J...",
+  "local_part": "support",
+  "name": "Support"
+}
+```
+
+This creates `support@example.com`. List aliases with
+`GET /api/mailboxes/{mailbox-id}/aliases`, or remove one using
+`DELETE /api/mailboxes/{mailbox-id}/aliases/{alias-id}`. Pass the alias in an
+outbound message to send from it:
+
+```json
+{"mailbox_id":"01J...","from_alias_id":"01J...","to":[{"address":"recipient@example.net"}]}
+```
 
 ### Mailbox email quota
 

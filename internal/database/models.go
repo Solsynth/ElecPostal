@@ -25,15 +25,15 @@ type Mailbox struct {
 	UpdatedAt   time.Time      `json:"updated_at"`
 }
 
-// MailConnection records a workspace-owned provider sending identity. Secrets
+// CustomDomain records a workspace-owned provider sending domain. Secrets
 // are never persisted: the configured AWS SDK credential chain owns access to
 // SES, while this row stores only public verification metadata.
-type MailConnection struct {
+type CustomDomain struct {
 	ID                       string         `gorm:"primaryKey;size:36" json:"id"`
-	WorkspaceID              string         `gorm:"uniqueIndex:idx_mail_connections_workspace_provider_identity,priority:1;size:36" json:"workspace_id"`
-	Provider                 string         `gorm:"uniqueIndex:idx_mail_connections_workspace_provider_identity,priority:2;size:32" json:"provider"`
-	Identity                 string         `gorm:"uniqueIndex:idx_mail_connections_workspace_provider_identity,priority:3;size:255" json:"identity"`
-	IdentityType             string         `gorm:"size:32" json:"identity_type"`
+	WorkspaceID              string         `gorm:"uniqueIndex:idx_custom_domains_workspace_provider_domain,priority:1;size:36" json:"workspace_id"`
+	Provider                 string         `gorm:"uniqueIndex:idx_custom_domains_workspace_provider_domain,priority:2;size:32" json:"provider"`
+	Domain                   string         `gorm:"uniqueIndex:idx_custom_domains_workspace_provider_domain,priority:3;size:255" json:"domain"`
+	DomainType               string         `gorm:"size:32" json:"domain_type"`
 	VerificationStatus       string         `gorm:"size:32" json:"verification_status"`
 	VerifiedForSendingStatus bool           `json:"verified_for_sending_status"`
 	DKIMStatus               string         `gorm:"size:32" json:"dkim_status"`
@@ -42,9 +42,44 @@ type MailConnection struct {
 	UpdatedAt                time.Time      `json:"updated_at"`
 }
 
-func (c *MailConnection) BeforeCreate(tx *gorm.DB) error {
+func (c *CustomDomain) BeforeCreate(tx *gorm.DB) error {
 	if c.ID == "" {
 		c.ID = NewID()
+	}
+	return nil
+}
+
+// MailboxAlias is an additional sender and inbound-recipient address for a
+// mailbox. It always belongs to a verified workspace custom domain.
+type MailboxAlias struct {
+	ID             string    `gorm:"primaryKey;size:36" json:"id"`
+	MailboxID      string    `gorm:"index:idx_mailbox_aliases_mailbox_id;size:36" json:"mailbox_id"`
+	CustomDomainID string    `gorm:"index:idx_mailbox_aliases_custom_domain_id;size:36" json:"custom_domain_id"`
+	Address        string    `gorm:"uniqueIndex;size:255" json:"address"`
+	Name           string    `gorm:"size:128" json:"name"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+// MailForwarding forwards mail received through a specific alias. Keeping the
+// source explicit avoids accidentally forwarding every message in a mailbox.
+type MailForwarding struct {
+	ID          string    `gorm:"primaryKey;size:36" json:"id"`
+	MailboxID   string    `gorm:"index:idx_mail_forwardings_mailbox_id;size:36" json:"mailbox_id"`
+	AliasID     string    `gorm:"uniqueIndex:idx_mail_forwardings_alias_destination,priority:1;size:36" json:"alias_id"`
+	Destination string    `gorm:"uniqueIndex:idx_mail_forwardings_alias_destination,priority:2;size:255" json:"destination"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+func (f *MailForwarding) BeforeCreate(tx *gorm.DB) error {
+	if f.ID == "" { f.ID = NewID() }
+	return nil
+}
+
+func (a *MailboxAlias) BeforeCreate(tx *gorm.DB) error {
+	if a.ID == "" {
+		a.ID = NewID()
 	}
 	return nil
 }

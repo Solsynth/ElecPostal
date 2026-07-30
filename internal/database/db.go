@@ -31,8 +31,25 @@ func Open(cfg *config.Config) (*DB, error) {
 
 // AutoMigrate provisions the schema for this pre-release service.
 func (d *DB) AutoMigrate() error {
+	// Preserve the first pre-release name for installations that already used
+	// mail-connections before the public API was renamed to custom domains.
+	if d.Migrator().HasTable("mail_connections") && !d.Migrator().HasTable("custom_domains") {
+		if err := d.Migrator().RenameTable("mail_connections", "custom_domains"); err != nil {
+			return err
+		}
+	}
+	if d.Migrator().HasTable("custom_domains") && d.Migrator().HasColumn("custom_domains", "identity") {
+		if err := d.Migrator().RenameColumn("custom_domains", "identity", "domain"); err != nil {
+			return err
+		}
+	}
+	if d.Migrator().HasTable("custom_domains") && d.Migrator().HasColumn("custom_domains", "identity_type") {
+		if err := d.Migrator().RenameColumn("custom_domains", "identity_type", "domain_type"); err != nil {
+			return err
+		}
+	}
 	if err := d.DB.AutoMigrate(
-		&Mailbox{}, &MailConnection{}, &Email{}, &Recipient{}, &Attachment{},
+		&Mailbox{}, &MailboxAlias{}, &MailForwarding{}, &CustomDomain{}, &Email{}, &Recipient{}, &Attachment{},
 		&MailProtocolCredential{}, &EmailLabel{}, &EmailLabelMapping{},
 		&MailSendUsage{}, &MailBlockRule{}, &MessageSource{}, &MailFolder{},
 		&FolderMessage{}, &MailOutbox{},
