@@ -3,6 +3,8 @@ package imap
 import (
 	"testing"
 
+	goimap "github.com/emersion/go-imap"
+
 	"src.solsynth.dev/sosys/elecpostal/internal/service"
 )
 
@@ -31,5 +33,19 @@ func TestSearchMatch(t *testing.T) {
 	}
 	if searchMatch(message, []string{"UNSEEN"}) {
 		t.Fatal("unexpected unseen match")
+	}
+}
+
+func TestPopulateFetchMetadataForAppleMailFetch(t *testing.T) {
+	items := []goimap.FetchItem{goimap.FetchEnvelope, goimap.FetchBodyStructure, goimap.FetchFlags, goimap.FetchRFC822Size}
+	message := goimap.NewMessage(1, items)
+	if err := populateFetchMetadata(message, []byte("From: sender@example.test\r\nTo: receiver@example.test\r\nSubject: Test\r\nContent-Type: text/plain\r\n\r\nbody"), items); err != nil {
+		t.Fatal(err)
+	}
+	if message.Envelope == nil || message.Envelope.Subject != "Test" {
+		t.Fatalf("envelope = %#v", message.Envelope)
+	}
+	if message.BodyStructure == nil {
+		t.Fatal("BODYSTRUCTURE was not populated")
 	}
 }

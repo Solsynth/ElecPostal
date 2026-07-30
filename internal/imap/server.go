@@ -8,13 +8,16 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/mail"
 	"strings"
 	"sync"
 	"time"
 
 	goimap "github.com/emersion/go-imap"
 	"github.com/emersion/go-imap/backend"
+	"github.com/emersion/go-imap/backend/backendutil"
 	imapserver "github.com/emersion/go-imap/server"
+	messageproto "github.com/emersion/go-message/textproto"
 
 	"src.solsynth.dev/sosys/elecpostal/internal/config"
 	"src.solsynth.dev/sosys/elecpostal/internal/database"
@@ -184,6 +187,9 @@ func (m *imapMailbox) ListMessages(uid bool, set *goimap.SeqSet, items []goimap.
 		msg.Size = uint32(len(x.Raw))
 		msg.InternalDate = time.Now()
 		msg.Body = map[*goimap.BodySectionName]goimap.Literal{}
+		if err := populateFetchMetadata(msg, x.Raw, items); err != nil {
+			return err
+		}
 		for _, item := range items {
 			for _, item = range item.Expand() {
 				if section, err := goimap.ParseBodySectionName(item); err == nil {
@@ -194,6 +200,48 @@ func (m *imapMailbox) ListMessages(uid bool, set *goimap.SeqSet, items []goimap.
 		ch <- msg
 	}
 	return nil
+}
+
+func populateFetchMetadata(msg *goimap.Message, raw []byte, items []goimap.FetchItem) error {
+	needEnvelope, needBodyStructure := false, false
+	for _, item := range items {
+		for _, expanded := range item.Expand() {
+			switch expanded {
+			case goimap.FetchEnvelope:
+				needEnvelope = true
+			case goimap.FetchBody, goimap.FetchBodyStructure:
+				needBodyStructure = true
+			}
+		}
+	}
+	if !needEnvelope && !needBodyStructure {
+		return nil
+	}
+	parsed, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	header := messageHeader(parsed.Header)
+	if needEnvelope {
+		msg.Envelope, err = backendutil.FetchEnvelope(header)
+		if err != nil {
+			return err
+		}
+	}
+	if needBodyStructure {
+		msg.BodyStructure, err = backendutil.FetchBodyStructure(header, parsed.Body, true)
+	}
+	return err
+}
+
+func messageHeader(source mail.Header) messageproto.Header {
+	var header messageproto.Header
+	for key, values := range source {
+		for _, value := range values {
+			header.Add(key, value)
+		}
+	}
+	return header
 }
 func (m *imapMailbox) SearchMessages(uid bool, c *goimap.SearchCriteria) ([]uint32, error) {
 	msgs, _, err := m.messages()
