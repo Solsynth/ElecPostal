@@ -1,18 +1,20 @@
-// Package imap implements the protocol core used by common mail clients.  The
-// parser is intentionally strict and keeps all state in the mailbox-scoped
-// service backend.
+// Package imap exposes ElecPostal mailboxes through the stable go-imap server.
 package imap
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/base64"
 	"fmt"
+	"io"
 	"net"
-	"strconv"
 	"strings"
 	"sync"
+	"time"
+
+	goimap "github.com/emersion/go-imap"
+	"github.com/emersion/go-imap/backend"
+	imapserver "github.com/emersion/go-imap/server"
 
 	"src.solsynth.dev/sosys/elecpostal/internal/config"
 	"src.solsynth.dev/sosys/elecpostal/internal/database"
@@ -27,19 +29,23 @@ type Backend interface {
 	CopyProtocolMessages(context.Context, string, string, string, []string) error
 	StoreProtocolFlags(context.Context, string, string, []string, []string, string, uint64) ([]service.ProtocolStoreResult, error)
 }
+
+// Server delegates command parsing, literals, STARTTLS, SASL PLAIN, and IMAP
+// state transitions to go-imap; this package is the ElecPostal storage adapter.
 type Server struct {
 	cfg     config.ListenerConfig
 	backend Backend
 	tls     *tls.Config
+	server  *imapserver.Server
 	ln      net.Listener
 	wg      sync.WaitGroup
 }
 
-func New(cfg config.ListenerConfig, backend Backend) (*Server, error) {
-	if backend == nil {
+func New(cfg config.ListenerConfig, b Backend) (*Server, error) {
+	if b == nil {
 		return nil, fmt.Errorf("IMAP backend is required")
 	}
-	s := &Server{cfg: cfg, backend: backend}
+	s := &Server{cfg: cfg, backend: b}
 	if cfg.Enabled && !strings.EqualFold(cfg.TLSMode, "disabled") {
 		if cfg.CertFile == "" || cfg.KeyFile == "" {
 			return nil, fmt.Errorf("IMAP TLS requires cert and key")
@@ -50,554 +56,303 @@ func New(cfg config.ListenerConfig, backend Backend) (*Server, error) {
 		}
 		s.tls = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
 	}
+	s.server = imapserver.New(&imapBackend{backend: b})
+	s.server.AllowInsecureAuth = s.tls == nil
+	if strings.EqualFold(cfg.TLSMode, "starttls") {
+		s.server.TLSConfig = s.tls
+	}
 	return s, nil
 }
 func (s *Server) Start() error {
 	if !s.cfg.Enabled {
 		return nil
 	}
-	ln, e := net.Listen("tcp", net.JoinHostPort(s.cfg.Host, s.cfg.Port))
-	if e != nil {
-		return e
+	ln, err := net.Listen("tcp", net.JoinHostPort(s.cfg.Host, s.cfg.Port))
+	if err != nil {
+		return err
+	}
+	if strings.EqualFold(s.cfg.TLSMode, "implicit") {
+		ln = tls.NewListener(ln, s.tls)
 	}
 	s.ln = ln
 	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		for {
-			c, e := ln.Accept()
-			if e != nil {
-				return
-			}
-			s.wg.Add(1)
-			go func() { defer s.wg.Done(); s.serve(c) }()
-		}
-	}()
+	go func() { defer s.wg.Done(); _ = s.server.Serve(ln) }()
 	return nil
 }
-func (s *Server) Close() error {
-	if s.ln != nil {
-		_ = s.ln.Close()
-	}
-	s.wg.Wait()
-	return nil
-}
+func (s *Server) Close() error { _ = s.server.Close(); s.wg.Wait(); return nil }
 
-func (s *Server) serve(conn net.Conn) {
-	secure := false
-	if s.tls != nil && strings.EqualFold(s.cfg.TLSMode, "implicit") {
-		tlsConn := tls.Server(conn, s.tls)
-		if err := tlsConn.Handshake(); err != nil {
-			return
-		}
-		conn = tlsConn
-		secure = true
-	}
-	// conn may be replaced by STARTTLS below; defer a closure so the active TLS
-	// connection emits close_notify instead of abruptly closing the raw socket.
-	defer func() { _ = conn.Close() }()
-	r, w := bufio.NewReader(conn), bufio.NewWriter(conn)
-	out(w, "* OK ElecPostal IMAP4rev1 ready")
-	var principal *service.ProtocolPrincipal
-	selected := ""
-	for {
-		line, e := r.ReadString('\n')
-		if e != nil {
-			return
-		}
-		fields := strings.Fields(strings.TrimSpace(line))
-		if len(fields) < 2 {
-			out(w, "* BAD malformed command")
-			continue
-		}
-		tag, cmd := fields[0], strings.ToUpper(fields[1])
-		args := fields[2:]
-		if principal == nil {
-			switch cmd {
-			case "STARTTLS":
-				if s.tls == nil || !strings.EqualFold(s.cfg.TLSMode, "starttls") || secure {
-					out(w, tag+" BAD STARTTLS unavailable")
-					continue
-				}
-				out(w, tag+" OK Begin TLS negotiation")
-				tlsConn := tls.Server(conn, s.tls)
-				if err := tlsConn.Handshake(); err != nil {
-					return
-				}
-				conn = tlsConn
-				r, w = bufio.NewReader(conn), bufio.NewWriter(conn)
-				secure = true
-			case "CAPABILITY":
-				out(w, "* CAPABILITY "+s.capability(secure, false))
-				out(w, tag+" OK CAPABILITY completed")
-			case "LOGIN":
-				if s.tls != nil && !secure {
-					out(w, tag+" NO [PRIVACYREQUIRED] STARTTLS required")
-					continue
-				}
-				if len(args) != 2 {
-					out(w, tag+" BAD LOGIN requires username and password")
-					continue
-				}
-				p, err := s.backend.AuthenticateMailProtocolAddress(context.Background(), unquote(args[0]), unquote(args[1]), "imap")
-				if err != nil {
-					out(w, tag+" NO authentication failed")
-					continue
-				}
-				principal = p
-				out(w, tag+" OK authenticated")
-			case "AUTHENTICATE":
-				if s.tls != nil && !secure {
-					out(w, tag+" NO [PRIVACYREQUIRED] STARTTLS required")
-					continue
-				}
-				if len(args) < 1 || strings.ToUpper(args[0]) != "PLAIN" {
-					out(w, tag+" NO unsupported authentication mechanism")
-					continue
-				}
-				payload := ""
-				if len(args) >= 2 {
-					payload = args[1]
-				} else {
-					// RFC 4959 continuation form, used by aerc and many Apple
-					// Mail configurations when SASL-IR is not advertised.
-					out(w, "+ ")
-					line, err := r.ReadString('\n')
-					if err != nil {
-						return
-					}
-					payload = strings.TrimSpace(line)
-					if payload == "*" {
-						out(w, tag+" NO authentication cancelled")
-						continue
-					}
-				}
-				decoded, err := base64.StdEncoding.DecodeString(payload)
-				parts := strings.Split(string(decoded), "\x00")
-				if err != nil || len(parts) != 3 {
-					out(w, tag+" NO authentication failed")
-					continue
-				}
-				p, err := s.backend.AuthenticateMailProtocolAddress(context.Background(), parts[1], parts[2], "imap")
-				if err != nil {
-					out(w, tag+" NO authentication failed")
-					continue
-				}
-				principal = p
-				out(w, tag+" OK authenticated")
-			case "LOGOUT":
-				out(w, "* BYE logout")
-				out(w, tag+" OK LOGOUT completed")
-				return
-			default:
-				out(w, tag+" NO authenticate first")
-			}
-			continue
-		}
-		switch cmd {
-		case "CAPABILITY":
-			out(w, "* CAPABILITY "+s.capability(secure, true))
-			out(w, tag+" OK CAPABILITY completed")
-		case "NAMESPACE":
-			out(w, "* NAMESPACE ((\"\" \"/\")) NIL NIL")
-			out(w, tag+" OK NAMESPACE completed")
-		case "LIST", "LSUB":
-			folders, err := s.backend.ListProtocolFolders(context.Background(), principal.MailboxID)
-			if err != nil {
-				out(w, tag+" NO folders unavailable")
-				continue
-			}
-			for _, folder := range folders {
-				attrs := []string{"\\HasNoChildren"}
-				if specialUse := imapSpecialUse(folder.SpecialUse); specialUse != "" {
-					attrs = append(attrs, specialUse)
-				}
-				out(w, fmt.Sprintf("* LIST (%s) \"/\" \"%s\"", strings.Join(attrs, " "), folder.Name))
-			}
-			out(w, tag+" OK LIST completed")
-		case "STATUS":
-			s.status(w, tag, args, principal)
-		case "ENABLE":
-			enabled := []string{}
-			for _, capability := range args {
-				if strings.EqualFold(capability, "CONDSTORE") || strings.EqualFold(capability, "QRESYNC") {
-					enabled = append(enabled, strings.ToUpper(capability))
-				}
-			}
-			if len(enabled) > 0 {
-				out(w, "* ENABLED "+strings.Join(enabled, " "))
-			}
-			out(w, tag+" OK ENABLE completed")
-		case "SELECT", "EXAMINE":
-			if len(args) < 1 {
-				out(w, tag+" BAD mailbox required")
-				continue
-			}
-			name := unquote(args[0])
-			msgs, folder, err := s.backend.ListProtocolFolder(context.Background(), principal.MailboxID, name)
-			if err != nil {
-				out(w, tag+" NO no such mailbox")
-				continue
-			}
-			selected = name
-			out(w, fmt.Sprintf("* %d EXISTS", len(msgs)))
-			out(w, fmt.Sprintf("* OK [UIDVALIDITY %d]", folder.UIDValidity))
-			out(w, fmt.Sprintf("* OK [UIDNEXT %d]", folder.NextUID))
-			out(w, fmt.Sprintf("* OK [HIGHESTMODSEQ %d]", folder.HighestModSeq))
-			out(w, tag+" OK [READ-WRITE] SELECT completed")
-		case "FETCH":
-			s.fetch(w, tag, args, principal, selected, false)
-		case "STORE":
-			s.store(w, tag, args, principal, selected, false)
-		case "COPY":
-			s.copyMove(w, tag, args, principal, selected, false, false)
-		case "MOVE":
-			s.copyMove(w, tag, args, principal, selected, false, true)
-		case "EXPUNGE":
-			s.expunge(w, tag, principal, selected)
-		case "UID":
-			if len(args) == 0 {
-				out(w, tag+" BAD UID command required")
-				continue
-			}
-			switch strings.ToUpper(args[0]) {
-			case "FETCH":
-				s.fetch(w, tag, args[1:], principal, selected, true)
-			case "SEARCH":
-				s.search(w, tag, args[1:], principal, selected, true)
-			case "STORE":
-				s.store(w, tag, args[1:], principal, selected, true)
-			case "COPY":
-				s.copyMove(w, tag, args[1:], principal, selected, true, false)
-			case "MOVE":
-				s.copyMove(w, tag, args[1:], principal, selected, true, true)
-			case "EXPUNGE":
-				s.expunge(w, tag, principal, selected)
-			default:
-				out(w, tag+" BAD unsupported UID command")
-			}
-		case "SEARCH":
-			s.search(w, tag, args, principal, selected, false)
-		case "NOOP":
-			out(w, tag+" OK NOOP completed")
-		case "IDLE":
-			out(w, "+ idling")
-			for {
-				l, e := r.ReadString('\n')
-				if e != nil {
-					return
-				}
-				if strings.EqualFold(strings.TrimSpace(l), "DONE") {
-					out(w, tag+" OK IDLE completed")
-					break
-				}
-			}
-		case "LOGOUT":
-			out(w, "* BYE logout")
-			out(w, tag+" OK LOGOUT completed")
-			return
-		default:
-			out(w, tag+" BAD command not implemented")
-		}
-	}
-}
-func imapSpecialUse(value string) string {
-	// Older development rows used two literal backslashes.  The wire protocol
-	// requires one, so normalize them while preserving existing data.
-	return strings.TrimPrefix(value, `\`)
-}
-func (s *Server) capability(secure, authenticated bool) string {
-	values := []string{"IMAP4rev1", "UIDPLUS", "MOVE", "IDLE", "SEARCH", "CONDSTORE", "QRESYNC", "SPECIAL-USE", "NAMESPACE"}
-	if !secure && s.tls != nil && strings.EqualFold(s.cfg.TLSMode, "starttls") {
-		values = append(values, "STARTTLS")
-	}
-	if !authenticated && (secure || s.tls == nil) {
-		values = append(values, "AUTH=PLAIN")
-	}
-	return strings.Join(values, " ")
-}
-func (s *Server) fetch(w *bufio.Writer, tag string, args []string, p *service.ProtocolPrincipal, folder string, uid bool) {
-	if folder == "" || len(args) < 2 {
-		out(w, tag+" BAD select a mailbox first")
-		return
-	}
-	msgs, _, e := s.backend.ListProtocolFolder(context.Background(), p.MailboxID, folder)
-	if e != nil {
-		out(w, tag+" NO mailbox unavailable")
-		return
-	}
-	for i, m := range msgs {
-		match := matchesSet(args[0], i+1, m.UID, uid, len(msgs))
-		if match {
-			out(w, fmt.Sprintf("* %d FETCH (UID %d RFC822.SIZE %d BODY[] {%d}", i+1, m.UID, len(m.Raw), len(m.Raw)))
-			_, _ = w.Write(m.Raw)
-			_, _ = w.WriteString("\r\n)\r\n")
-			_ = w.Flush()
-		}
-	}
-	out(w, tag+" OK FETCH completed")
-}
+type imapBackend struct{ backend Backend }
 
-func (s *Server) status(w *bufio.Writer, tag string, args []string, p *service.ProtocolPrincipal) {
-	if len(args) < 1 {
-		out(w, tag+" BAD STATUS requires a mailbox")
-		return
-	}
-	name := unquote(args[0])
-	msgs, folder, err := s.backend.ListProtocolFolder(context.Background(), p.MailboxID, name)
+func (b *imapBackend) Login(_ *goimap.ConnInfo, username, password string) (backend.User, error) {
+	p, err := b.backend.AuthenticateMailProtocolAddress(context.Background(), username, password, "imap")
 	if err != nil {
-		out(w, tag+" NO no such mailbox")
-		return
+		return nil, backend.ErrInvalidCredentials
 	}
-	unseen := 0
-	for _, message := range msgs {
-		if !hasFlag(message.Flags, "\\Seen") {
+	return &imapUser{backend: b.backend, mailboxID: p.MailboxID, username: username}, nil
+}
+
+type imapUser struct {
+	backend             Backend
+	mailboxID, username string
+}
+
+func (u *imapUser) Username() string { return u.username }
+func (u *imapUser) ListMailboxes(_ bool) ([]backend.Mailbox, error) {
+	folders, err := u.backend.ListProtocolFolders(context.Background(), u.mailboxID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]backend.Mailbox, 0, len(folders))
+	for _, f := range folders {
+		out = append(out, &imapMailbox{user: u, name: f.Name, folder: f})
+	}
+	return out, nil
+}
+func (u *imapUser) GetMailbox(name string) (backend.Mailbox, error) {
+	msgs, f, err := u.backend.ListProtocolFolder(context.Background(), u.mailboxID, name)
+	_ = msgs
+	if err != nil {
+		return nil, backend.ErrNoSuchMailbox
+	}
+	return &imapMailbox{user: u, name: f.Name, folder: *f}, nil
+}
+func (u *imapUser) CreateMailbox(string) error         { return fmt.Errorf("CREATE is not supported") }
+func (u *imapUser) DeleteMailbox(string) error         { return fmt.Errorf("DELETE is not supported") }
+func (u *imapUser) RenameMailbox(string, string) error { return fmt.Errorf("RENAME is not supported") }
+func (u *imapUser) Logout() error                      { return nil }
+
+type imapMailbox struct {
+	user   *imapUser
+	name   string
+	folder database.MailFolder
+}
+
+func (m *imapMailbox) Name() string { return m.name }
+func (m *imapMailbox) Info() (*goimap.MailboxInfo, error) {
+	attrs := []string{goimap.HasNoChildrenAttr}
+	if v := imapSpecialUse(m.folder.SpecialUse); v != "" {
+		attrs = append(attrs, v)
+	}
+	return &goimap.MailboxInfo{Name: m.name, Delimiter: "/", Attributes: attrs}, nil
+}
+func (m *imapMailbox) messages() ([]service.ProtocolMessage, *database.MailFolder, error) {
+	return m.user.backend.ListProtocolFolder(context.Background(), m.user.mailboxID, m.name)
+}
+func (m *imapMailbox) Status(items []goimap.StatusItem) (*goimap.MailboxStatus, error) {
+	msgs, f, err := m.messages()
+	if err != nil {
+		return nil, err
+	}
+	unseen := uint32(0)
+	for _, x := range msgs {
+		if !hasFlag(x.Flags, goimap.SeenFlag) {
 			unseen++
 		}
 	}
-	out(w, fmt.Sprintf("* STATUS \"%s\" (MESSAGES %d UNSEEN %d UIDNEXT %d UIDVALIDITY %d HIGHESTMODSEQ %d)", name, len(msgs), unseen, folder.NextUID, folder.UIDValidity, folder.HighestModSeq))
-	out(w, tag+" OK STATUS completed")
+	st := goimap.NewMailboxStatus(m.name, items)
+	st.Flags = []string{goimap.SeenFlag, goimap.AnsweredFlag, goimap.FlaggedFlag, goimap.DeletedFlag, goimap.DraftFlag}
+	st.PermanentFlags = append([]string{}, st.Flags...)
+	st.Messages = uint32(len(msgs))
+	st.Unseen = unseen
+	st.UidNext = f.NextUID
+	st.UidValidity = f.UIDValidity
+	return st, nil
 }
-
-func (s *Server) store(w *bufio.Writer, tag string, args []string, p *service.ProtocolPrincipal, folder string, uid bool) {
-	if folder == "" || len(args) < 3 {
-		out(w, tag+" BAD STORE requires a message set, operation, and flags")
-		return
-	}
-	msgs, _, err := s.backend.ListProtocolFolder(context.Background(), p.MailboxID, folder)
+func (m *imapMailbox) SetSubscribed(bool) error { return nil }
+func (m *imapMailbox) Check() error             { return nil }
+func (m *imapMailbox) ListMessages(uid bool, set *goimap.SeqSet, items []goimap.FetchItem, ch chan<- *goimap.Message) error {
+	defer close(ch)
+	msgs, _, err := m.messages()
 	if err != nil {
-		out(w, tag+" NO mailbox unavailable")
-		return
+		return err
 	}
-	ids := selectedIDs(msgs, args[0], uid)
-	if len(ids) == 0 {
-		out(w, tag+" OK STORE completed")
-		return
-	}
-	operation := strings.ToUpper(args[1])
-	mode := "replace"
-	if strings.HasPrefix(operation, "+") {
-		mode = "add"
-	}
-	if strings.HasPrefix(operation, "-") {
-		mode = "remove"
-	}
-	unchanged := uint64(0)
-	flagsAt := 2
-	if strings.EqualFold(args[1], "UNCHANGEDSINCE") && len(args) >= 5 {
-		unchanged, _ = strconv.ParseUint(args[2], 10, 64)
-		operation = strings.ToUpper(args[3])
-		flagsAt = 4
-		mode = "replace"
-		if strings.HasPrefix(operation, "+") {
-			mode = "add"
+	for i, x := range msgs {
+		n := uint32(i + 1)
+		if uid {
+			n = x.UID
 		}
-		if strings.HasPrefix(operation, "-") {
-			mode = "remove"
+		if !set.Contains(n) {
+			continue
 		}
-	}
-	flags := parseFlags(strings.Join(args[flagsAt:], " "))
-	updated, err := s.backend.StoreProtocolFlags(context.Background(), p.MailboxID, folder, ids, flags, mode, unchanged)
-	if err != nil {
-		out(w, tag+" NO STORE failed")
-		return
-	}
-	if !strings.Contains(operation, ".SILENT") {
-		for _, value := range updated {
-			seq := sequenceFor(msgs, value.EmailID)
-			out(w, fmt.Sprintf("* %d FETCH (UID %d FLAGS (%s) MODSEQ (%d))", seq, value.UID, strings.Join(value.Flags, " "), value.ModSeq))
+		msg := &goimap.Message{SeqNum: uint32(i + 1), Uid: x.UID, Flags: x.Flags, Size: uint32(len(x.Raw)), InternalDate: time.Now(), Body: map[*goimap.BodySectionName]goimap.Literal{}}
+		for _, item := range items {
+			for _, item = range item.Expand() {
+				if section, err := goimap.ParseBodySectionName(item); err == nil {
+					msg.Body[section] = literal{Reader: bytes.NewReader(x.Raw), n: len(x.Raw)}
+				}
+			}
 		}
+		ch <- msg
 	}
-	out(w, tag+" OK STORE completed")
+	return nil
 }
-
-func (s *Server) copyMove(w *bufio.Writer, tag string, args []string, p *service.ProtocolPrincipal, folder string, uid, move bool) {
-	if folder == "" || len(args) < 2 {
-		out(w, tag+" BAD select a mailbox and provide destination")
-		return
-	}
-	msgs, _, err := s.backend.ListProtocolFolder(context.Background(), p.MailboxID, folder)
+func (m *imapMailbox) SearchMessages(uid bool, c *goimap.SearchCriteria) ([]uint32, error) {
+	msgs, _, err := m.messages()
 	if err != nil {
-		out(w, tag+" NO mailbox unavailable")
-		return
+		return nil, err
 	}
-	ids := selectedIDs(msgs, args[0], uid)
-	destination := unquote(args[1])
-	if move {
-		err = s.backend.MoveProtocolMessages(context.Background(), p.MailboxID, folder, destination, ids)
-	} else {
-		err = s.backend.CopyProtocolMessages(context.Background(), p.MailboxID, folder, destination, ids)
+	out := []uint32{}
+	for i, x := range msgs {
+		if matchesCriteria(x, c) {
+			if uid {
+				out = append(out, x.UID)
+			} else {
+				out = append(out, uint32(i+1))
+			}
+		}
 	}
-	if err != nil {
-		out(w, tag+" NO destination unavailable")
-		return
-	}
-	if move {
-		out(w, tag+" OK [MOVE] MOVE completed")
-	} else {
-		out(w, tag+" OK [COPYUID] COPY completed")
-	}
+	return out, nil
 }
-
-func (s *Server) expunge(w *bufio.Writer, tag string, p *service.ProtocolPrincipal, folder string) {
-	if folder == "" {
-		out(w, tag+" BAD select a mailbox first")
-		return
-	}
-	msgs, _, err := s.backend.ListProtocolFolder(context.Background(), p.MailboxID, folder)
+func (m *imapMailbox) CreateMessage([]string, time.Time, goimap.Literal) error {
+	return fmt.Errorf("APPEND is not supported")
+}
+func (m *imapMailbox) UpdateMessagesFlags(uid bool, set *goimap.SeqSet, op goimap.FlagsOp, flags []string) error {
+	msgs, _, err := m.messages()
 	if err != nil {
-		out(w, tag+" NO mailbox unavailable")
-		return
+		return err
 	}
 	ids := []string{}
-	for i, m := range msgs {
-		if hasFlag(m.Flags, "\\Deleted") {
-			ids = append(ids, m.EmailID)
-			out(w, fmt.Sprintf("* %d EXPUNGE", i+1))
+	for i, x := range msgs {
+		n := uint32(i + 1)
+		if uid {
+			n = x.UID
+		}
+		if set.Contains(n) {
+			ids = append(ids, x.EmailID)
 		}
 	}
-	if len(ids) > 0 {
-		if err := s.backend.MoveProtocolMessages(context.Background(), p.MailboxID, folder, "Trash", ids); err != nil {
-			out(w, tag+" NO EXPUNGE failed")
-			return
-		}
+	mode := "replace"
+	if op == goimap.AddFlags {
+		mode = "add"
 	}
-	out(w, tag+" OK EXPUNGE completed")
+	if op == goimap.RemoveFlags {
+		mode = "remove"
+	}
+	_, err = m.user.backend.StoreProtocolFlags(context.Background(), m.user.mailboxID, m.name, ids, flags, mode, 0)
+	return err
 }
-
-func (s *Server) search(w *bufio.Writer, tag string, args []string, p *service.ProtocolPrincipal, folder string, uid bool) {
-	if folder == "" {
-		out(w, tag+" BAD select a mailbox first")
-		return
-	}
-	msgs, _, err := s.backend.ListProtocolFolder(context.Background(), p.MailboxID, folder)
+func (m *imapMailbox) CopyMessages(uid bool, set *goimap.SeqSet, dest string) error {
+	return m.transfer(uid, set, dest, false)
+}
+func (m *imapMailbox) MoveMessages(uid bool, set *goimap.SeqSet, dest string) error {
+	return m.transfer(uid, set, dest, true)
+}
+func (m *imapMailbox) Expunge() error {
+	msgs, _, err := m.messages()
 	if err != nil {
-		out(w, tag+" NO mailbox unavailable")
-		return
+		return err
 	}
-	result := []string{}
-	for i, m := range msgs {
-		if searchMatch(m, args) {
-			if uid {
-				result = append(result, strconv.Itoa(int(m.UID)))
-			} else {
-				result = append(result, strconv.Itoa(i+1))
-			}
+	ids := []string{}
+	for _, x := range msgs {
+		if hasFlag(x.Flags, goimap.DeletedFlag) {
+			ids = append(ids, x.EmailID)
 		}
 	}
-	out(w, "* SEARCH "+strings.Join(result, " "))
-	out(w, tag+" OK SEARCH completed")
+	if len(ids) == 0 {
+		return nil
+	}
+	return m.user.backend.MoveProtocolMessages(context.Background(), m.user.mailboxID, m.name, "Trash", ids)
+}
+func (m *imapMailbox) transfer(uid bool, set *goimap.SeqSet, dest string, move bool) error {
+	msgs, _, err := m.messages()
+	if err != nil {
+		return err
+	}
+	ids := []string{}
+	for i, x := range msgs {
+		n := uint32(i + 1)
+		if uid {
+			n = x.UID
+		}
+		if set.Contains(n) {
+			ids = append(ids, x.EmailID)
+		}
+	}
+	if move {
+		return m.user.backend.MoveProtocolMessages(context.Background(), m.user.mailboxID, m.name, dest, ids)
+	}
+	return m.user.backend.CopyProtocolMessages(context.Background(), m.user.mailboxID, m.name, dest, ids)
 }
 
-func searchMatch(m service.ProtocolMessage, args []string) bool {
-	if len(args) == 0 || (len(args) == 1 && strings.EqualFold(args[0], "ALL")) {
-		return true
+type literal struct {
+	io.Reader
+	n int
+}
+
+func (l literal) Len() int               { return l.n }
+func imapSpecialUse(value string) string { return strings.TrimPrefix(value, `\`) }
+func hasFlag(flags []string, flag string) bool {
+	for _, v := range flags {
+		if strings.EqualFold(v, flag) {
+			return true
+		}
+	}
+	return false
+}
+func matchesCriteria(m service.ProtocolMessage, c *goimap.SearchCriteria) bool {
+	if c.Uid != nil && !c.Uid.Contains(m.UID) {
+		return false
+	}
+	for _, f := range c.WithFlags {
+		if !hasFlag(m.Flags, f) {
+			return false
+		}
+	}
+	for _, f := range c.WithoutFlags {
+		if hasFlag(m.Flags, f) {
+			return false
+		}
 	}
 	raw := strings.ToLower(string(m.Raw))
-	for i := 0; i < len(args); i++ {
-		token := strings.ToUpper(args[i])
-		switch token {
-		case "SEEN":
-			if !hasFlag(m.Flags, "\\Seen") {
-				return false
-			}
-		case "UNSEEN":
-			if hasFlag(m.Flags, "\\Seen") {
-				return false
-			}
-		case "DELETED":
-			if !hasFlag(m.Flags, "\\Deleted") {
-				return false
-			}
-		case "UNDELETED":
-			if hasFlag(m.Flags, "\\Deleted") {
-				return false
-			}
-		case "TEXT", "BODY", "FROM", "TO", "SUBJECT":
-			if i+1 >= len(args) {
-				return false
-			}
-			i++
-			needle := strings.ToLower(unquote(args[i]))
-			if !strings.Contains(raw, needle) {
-				return false
-			}
-		case "UID":
-			if i+1 >= len(args) {
-				return false
-			}
-			i++
-			if !matchesSet(args[i], 0, m.UID, true, int(m.UID)) {
-				return false
-			}
-		case "NOT":
-			if i+1 >= len(args) {
-				return false
-			}
-			i++
-			if searchMatch(m, []string{args[i]}) {
+	for _, v := range c.Text {
+		if !strings.Contains(raw, strings.ToLower(v)) {
+			return false
+		}
+	}
+	for _, v := range c.Body {
+		if !strings.Contains(raw, strings.ToLower(v)) {
+			return false
+		}
+	}
+	for k, values := range c.Header {
+		for _, v := range values {
+			if !strings.Contains(raw, strings.ToLower(k+": "+v)) {
 				return false
 			}
 		}
 	}
 	return true
 }
-func selectedIDs(msgs []service.ProtocolMessage, set string, uid bool) []string {
-	ids := []string{}
-	for i, m := range msgs {
-		if matchesSet(set, i+1, m.UID, uid, len(msgs)) {
-			ids = append(ids, m.EmailID)
+func searchMatch(m service.ProtocolMessage, args []string) bool {
+	return matchesCriteria(m, &goimap.SearchCriteria{WithFlags: searchFlags(args, true), WithoutFlags: searchFlags(args, false)})
+}
+func searchFlags(args []string, seen bool) []string {
+	for _, a := range args {
+		if (seen && strings.EqualFold(a, "SEEN")) || (!seen && strings.EqualFold(a, "UNSEEN")) {
+			return []string{goimap.SeenFlag}
 		}
 	}
-	return ids
-}
-func sequenceFor(msgs []service.ProtocolMessage, id string) int {
-	for i, m := range msgs {
-		if m.EmailID == id {
-			return i + 1
-		}
-	}
-	return 0
-}
-func hasFlag(flags []string, flag string) bool {
-	for _, value := range flags {
-		if strings.EqualFold(value, flag) {
-			return true
-		}
-	}
-	return false
-}
-func parseFlags(raw string) []string {
-	raw = strings.Trim(strings.TrimSpace(raw), "()")
-	if raw == "" {
-		return nil
-	}
-	return strings.Fields(raw)
+	return nil
 }
 func matchesSet(set string, sequence int, uid uint32, useUID bool, last int) bool {
-	value := int(uid)
-	if !useUID {
-		value = sequence
+	value := sequence
+	if useUID {
+		value = int(uid)
 	}
 	for _, part := range strings.Split(set, ",") {
 		bounds := strings.Split(part, ":")
-		if len(bounds) == 1 {
-			n, _ := strconv.Atoi(bounds[0])
-			if bounds[0] == "*" {
-				n = last
+		parse := func(v string) int {
+			if v == "*" {
+				return last
 			}
-			if value == n {
-				return true
-			}
-			continue
+			n := 0
+			fmt.Sscan(v, &n)
+			return n
 		}
-		lo, _ := strconv.Atoi(bounds[0])
-		hi, _ := strconv.Atoi(bounds[1])
-		if bounds[0] == "*" {
-			lo = last
-		}
-		if bounds[1] == "*" {
-			hi = last
+		lo := parse(bounds[0])
+		hi := lo
+		if len(bounds) > 1 {
+			hi = parse(bounds[1])
 		}
 		if lo > hi {
 			lo, hi = hi, lo
@@ -608,5 +363,3 @@ func matchesSet(set string, sequence int, uid uint32, useUID bool, last int) boo
 	}
 	return false
 }
-func out(w *bufio.Writer, v string) { _, _ = w.WriteString(v + "\r\n"); _ = w.Flush() }
-func unquote(v string) string       { return strings.Trim(v, "\"") }
