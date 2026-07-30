@@ -69,6 +69,50 @@ Creating a mailbox requires the authenticated account to be an active member of
 the selected workspace. Workspace plans allow 1 mailbox on Free, 3 on Pro, and
 10 on Enterprise.
 
+## Custom SES sending identities
+
+When the server is configured with `mail.relay.adapter = "ses"`, workspace
+members can connect an SES sending identity without submitting AWS secrets. The
+service uses its configured AWS SDK credential chain, so the IAM role needs
+`ses:CreateEmailIdentity`, `ses:GetEmailIdentity`, and `ses:DeleteEmailIdentity`.
+
+### Create an identity
+
+`POST /api/mail-connections`
+
+```json
+{
+  "workspace_id": "01J...",
+  "provider": "ses",
+  "identity": "example.com"
+}
+```
+
+For a domain, the result contains the Easy DKIM CNAME records under
+`dns_records`; publish all of them, then refresh the connection. For an email
+address identity, SES sends its normal confirmation message to that address.
+
+```json
+{
+  "id": "01J...",
+  "provider": "ses",
+  "identity": "example.com",
+  "verification_status": "PENDING",
+  "verified_for_sending_status": false,
+  "dns_records": [
+    {"name":"token._domainkey.example.com","type":"CNAME","value":"token.dkim.amazonses.com"}
+  ]
+}
+```
+
+`GET /api/mail-connections?workspace_id={workspace-id}` lists connections.
+`POST /api/mail-connections/{id}/refresh` fetches the latest SES verification
+and DKIM status. `DELETE /api/mail-connections/{id}` removes both the local
+connection and the SES identity; this stops SES sending from that identity.
+Non-draft custom-domain sends require a verified connection in the mailbox's
+workspace (either the exact sender address or its domain). The configured
+canonical `mail.domain` remains an operator-managed identity.
+
 ### Mailbox email quota
 
 `GET /api/mailboxes/{mailbox-id}/quota`

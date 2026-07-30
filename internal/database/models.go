@@ -25,6 +25,30 @@ type Mailbox struct {
 	UpdatedAt   time.Time      `json:"updated_at"`
 }
 
+// MailConnection records a workspace-owned provider sending identity. Secrets
+// are never persisted: the configured AWS SDK credential chain owns access to
+// SES, while this row stores only public verification metadata.
+type MailConnection struct {
+	ID                       string         `gorm:"primaryKey;size:36" json:"id"`
+	WorkspaceID              string         `gorm:"uniqueIndex:idx_mail_connections_workspace_provider_identity,priority:1;size:36" json:"workspace_id"`
+	Provider                 string         `gorm:"uniqueIndex:idx_mail_connections_workspace_provider_identity,priority:2;size:32" json:"provider"`
+	Identity                 string         `gorm:"uniqueIndex:idx_mail_connections_workspace_provider_identity,priority:3;size:255" json:"identity"`
+	IdentityType             string         `gorm:"size:32" json:"identity_type"`
+	VerificationStatus       string         `gorm:"size:32" json:"verification_status"`
+	VerifiedForSendingStatus bool           `json:"verified_for_sending_status"`
+	DKIMStatus               string         `gorm:"size:32" json:"dkim_status"`
+	DNSRecords               datatypes.JSON `gorm:"type:jsonb" json:"dns_records"`
+	CreatedAt                time.Time      `json:"created_at"`
+	UpdatedAt                time.Time      `json:"updated_at"`
+}
+
+func (c *MailConnection) BeforeCreate(tx *gorm.DB) error {
+	if c.ID == "" {
+		c.ID = NewID()
+	}
+	return nil
+}
+
 func (m *Mailbox) BeforeCreate(tx *gorm.DB) error {
 	if m.ID == "" {
 		m.ID = NewID()

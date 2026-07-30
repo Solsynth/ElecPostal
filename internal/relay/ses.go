@@ -23,6 +23,9 @@ type SESConfig struct {
 
 type sesClient interface {
 	SendEmail(context.Context, *sesv2.SendEmailInput, ...func(*sesv2.Options)) (*sesv2.SendEmailOutput, error)
+	CreateEmailIdentity(context.Context, *sesv2.CreateEmailIdentityInput, ...func(*sesv2.Options)) (*sesv2.CreateEmailIdentityOutput, error)
+	GetEmailIdentity(context.Context, *sesv2.GetEmailIdentityInput, ...func(*sesv2.Options)) (*sesv2.GetEmailIdentityOutput, error)
+	DeleteEmailIdentity(context.Context, *sesv2.DeleteEmailIdentityInput, ...func(*sesv2.Options)) (*sesv2.DeleteEmailIdentityOutput, error)
 }
 
 // SESAdapter sends outbound mail with the AWS SES API v2.
@@ -83,3 +86,52 @@ func sesMessage(message Message) *types.Message {
 }
 
 func (a *SESAdapter) Close() error { return nil }
+
+// CreateIdentity starts SES verification. Domains use Easy DKIM and return the
+// three CNAME records that must be published; email-address identities receive
+// an SES verification email instead.
+func (a *SESAdapter) CreateIdentity(ctx context.Context, identity string) (IdentityStatus, error) {
+	output, err := a.client.CreateEmailIdentity(ctx, &sesv2.CreateEmailIdentityInput{EmailIdentity: aws.String(identity)})
+	if err != nil {
+		return IdentityStatus{}, fmt.Errorf("create SES email identity: %w", err)
+	}
+	verificationStatus := "PENDING"
+	if output.VerifiedForSendingStatus {
+		verificationStatus = "SUCCESS"
+	}
+	return sesIdentityStatus(identity, string(output.IdentityType), verificationStatus, output.VerifiedForSendingStatus, output.DkimAttributes), nil
+}
+
+// GetIdentity refreshes identity verification and Easy DKIM state from SES.
+func (a *SESAdapter) GetIdentity(ctx context.Context, identity string) (IdentityStatus, error) {
+	output, err := a.client.GetEmailIdentity(ctx, &sesv2.GetEmailIdentityInput{EmailIdentity: aws.String(identity)})
+	if err != nil {
+		return IdentityStatus{}, fmt.Errorf("get SES email identity: %w", err)
+	}
+	return sesIdentityStatus(identity, string(output.IdentityType), string(output.VerificationStatus), output.VerifiedForSendingStatus, output.DkimAttributes), nil
+}
+
+// DeleteIdentity removes an SES identity. Callers must first ensure that no
+// other workspace still depends on it.
+func (a *SESAdapter) DeleteIdentity(ctx context.Context, identity string) error {
+	if _, err := a.client.DeleteEmailIdentity(ctx, &sesv2.DeleteEmailIdentityInput{EmailIdentity: aws.String(identity)}); err != nil {
+		return fmt.Errorf("delete SES email identity: %w", err)
+	}
+	return nil
+}
+
+func sesIdentityStatus(identity, identityType, verificationStatus string, verified bool, dkim *types.DkimAttributes) IdentityStatus {
+	status := IdentityStatus{Identity: identity, IdentityType: identityType, VerificationStatus: verificationStatus, VerifiedForSendingStatus: verified}
+	if dkim == nil {
+		return status
+	}
+	status.DKIMStatus = string(dkim.Status)
+	for _, token := range dkim.Tokens {
+		status.DNSRecords = append(status.DNSRecords, DNSRecord{
+			Name:  token + "._domainkey." + identity,
+			Type:  "CNAME",
+			Value: token + ".dkim.amazonses.com",
+		})
+	}
+	return status
+}

@@ -2,9 +2,12 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/mail"
+	"net/url"
 	"strings"
 	"time"
 
@@ -154,6 +157,14 @@ type CreateBlockRuleInput struct {
 	Pattern     string `json:"pattern" binding:"required"`
 }
 
+// CreateMailConnectionInput begins verification of an SES sending identity for
+// a workspace. Identity may be a domain or one email address.
+type CreateMailConnectionInput struct {
+	WorkspaceID string `json:"workspace_id" binding:"required"`
+	Provider    string `json:"provider" binding:"required"`
+	Identity    string `json:"identity" binding:"required"`
+}
+
 const (
 	folderInbox   = "inbox"
 	folderSent    = "sent"
@@ -174,19 +185,26 @@ type MailboxQuota struct {
 
 // EmailService handles email-related business logic.
 type EmailService struct {
-	db        *database.DB
-	notifier  NotificationSender
-	realtime  realtime.Publisher
-	files     filesystem.Uploader
-	relay     relay.Adapter
-	workspace workspace.Provider
-	domain    string
+	db         *database.DB
+	notifier   NotificationSender
+	realtime   realtime.Publisher
+	files      filesystem.Uploader
+	relay      relay.Adapter
+	workspace  workspace.Provider
+	identities relay.IdentityManager
+	domain     string
 }
 
 // SetRelay configures outbound delivery. A nil adapter retains the existing
 // persistence-only behavior for deployments without delivery enabled.
 func (s *EmailService) SetRelay(adapter relay.Adapter) {
 	s.relay = adapter
+}
+
+// SetIdentityManager enables provider identity provisioning. It is normally
+// the SES adapter configured as the outbound relay.
+func (s *EmailService) SetIdentityManager(manager relay.IdentityManager) {
+	s.identities = manager
 }
 
 // SetRealtimePublisher enables non-blocking mailbox change pushes.
@@ -329,6 +347,150 @@ func (s *EmailService) ListMailboxes(ctx context.Context, accountID uuid.UUID, w
 		return nil, err
 	}
 	return items, nil
+}
+
+// CreateMailConnection provisions a workspace-owned SES identity. Credentials
+// remain server-side in the AWS SDK provider chain and are never accepted from
+// HTTP clients or written to this service's database.
+func (s *EmailService) CreateMailConnection(ctx context.Context, accountID uuid.UUID, input CreateMailConnectionInput) (*database.MailConnection, error) {
+	if s.identities == nil {
+		return nil, relay.ErrIdentityManagementUnavailable
+	}
+	if strings.ToLower(strings.TrimSpace(input.Provider)) != "ses" {
+		return nil, fmt.Errorf("provider must be ses")
+	}
+	if err := s.authorizeWorkspaceMember(ctx, strings.TrimSpace(input.WorkspaceID), accountID); err != nil {
+		return nil, err
+	}
+	identity, err := normalizeSendingIdentity(input.Identity)
+	if err != nil {
+		return nil, err
+	}
+	var existing database.MailConnection
+	err = s.db.WithContext(ctx).Where("workspace_id = ? AND provider = ? AND identity = ?", input.WorkspaceID, "ses", identity).First(&existing).Error
+	if err == nil {
+		return s.refreshMailConnection(ctx, &existing)
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	status, err := s.identities.CreateIdentity(ctx, identity)
+	if err != nil {
+		return nil, err
+	}
+	// Never let a workspace claim an already-verified account-wide SES identity
+	// that was not created through its own connection record. This prevents a
+	// tenant from discovering and using another tenant's sender identity.
+	if status.VerifiedForSendingStatus {
+		return nil, fmt.Errorf("SES identity already exists; contact an administrator to associate it")
+	}
+	connection := database.MailConnection{WorkspaceID: strings.TrimSpace(input.WorkspaceID), Provider: "ses", Identity: identity}
+	applyIdentityStatus(&connection, status)
+	if err := s.db.WithContext(ctx).Create(&connection).Error; err != nil {
+		return nil, err
+	}
+	return &connection, nil
+}
+
+// ListMailConnections returns sending identities in one workspace. Membership
+// is checked even though identity status itself is public DNS metadata.
+func (s *EmailService) ListMailConnections(ctx context.Context, accountID uuid.UUID, workspaceID string) ([]database.MailConnection, error) {
+	workspaceID = strings.TrimSpace(workspaceID)
+	if workspaceID == "" {
+		return nil, fmt.Errorf("workspace_id is required")
+	}
+	if err := s.authorizeWorkspaceMember(ctx, workspaceID, accountID); err != nil {
+		return nil, err
+	}
+	var connections []database.MailConnection
+	if err := s.db.WithContext(ctx).Where("workspace_id = ?", workspaceID).Order("created_at DESC").Find(&connections).Error; err != nil {
+		return nil, err
+	}
+	return connections, nil
+}
+
+// RefreshMailConnection updates persisted verification status from SES.
+func (s *EmailService) RefreshMailConnection(ctx context.Context, accountID uuid.UUID, connectionID string) (*database.MailConnection, error) {
+	if s.identities == nil {
+		return nil, relay.ErrIdentityManagementUnavailable
+	}
+	var connection database.MailConnection
+	if err := s.db.WithContext(ctx).Where("id = ?", connectionID).First(&connection).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	if err := s.authorizeWorkspaceMember(ctx, connection.WorkspaceID, accountID); err != nil {
+		return nil, err
+	}
+	return s.refreshMailConnection(ctx, &connection)
+}
+
+// DeleteMailConnection deletes the remote SES identity and then its local
+// record. A connection is scoped to one workspace, so identities cannot be
+// removed by members of other workspaces.
+func (s *EmailService) DeleteMailConnection(ctx context.Context, accountID uuid.UUID, connectionID string) error {
+	if s.identities == nil {
+		return relay.ErrIdentityManagementUnavailable
+	}
+	var connection database.MailConnection
+	if err := s.db.WithContext(ctx).Where("id = ?", connectionID).First(&connection).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if err := s.authorizeWorkspaceMember(ctx, connection.WorkspaceID, accountID); err != nil {
+		return err
+	}
+	var otherCount int64
+	if err := s.db.WithContext(ctx).Model(&database.MailConnection{}).Where("provider = ? AND identity = ? AND id <> ?", connection.Provider, connection.Identity, connection.ID).Count(&otherCount).Error; err != nil {
+		return err
+	}
+	if otherCount > 0 {
+		return fmt.Errorf("identity is also connected to another workspace")
+	}
+	if err := s.identities.DeleteIdentity(ctx, connection.Identity); err != nil {
+		return err
+	}
+	return s.db.WithContext(ctx).Delete(&connection).Error
+}
+
+func (s *EmailService) refreshMailConnection(ctx context.Context, connection *database.MailConnection) (*database.MailConnection, error) {
+	status, err := s.identities.GetIdentity(ctx, connection.Identity)
+	if err != nil {
+		return nil, err
+	}
+	applyIdentityStatus(connection, status)
+	if err := s.db.WithContext(ctx).Save(connection).Error; err != nil {
+		return nil, err
+	}
+	return connection, nil
+}
+
+func applyIdentityStatus(connection *database.MailConnection, status relay.IdentityStatus) {
+	connection.IdentityType = status.IdentityType
+	connection.VerificationStatus = status.VerificationStatus
+	connection.VerifiedForSendingStatus = status.VerifiedForSendingStatus
+	connection.DKIMStatus = status.DKIMStatus
+	records, _ := json.Marshal(status.DNSRecords)
+	connection.DNSRecords = datatypes.JSON(records)
+}
+
+func normalizeSendingIdentity(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if parsed, err := mail.ParseAddress(value); err == nil && parsed.Address == value {
+		return value, nil
+	}
+	if strings.Contains(value, "@") {
+		return "", fmt.Errorf("identity must be a valid email address or domain")
+	}
+	parsed, err := url.Parse("https://" + value)
+	if err != nil || parsed.Host != value || !strings.Contains(value, ".") {
+		return "", fmt.Errorf("identity must be a valid email address or domain")
+	}
+	return value, nil
 }
 
 // CreateMailbox creates a new mailbox for an account/workspace.
@@ -760,6 +922,11 @@ func (s *EmailService) SendEmail(ctx context.Context, accountID uuid.UUID, input
 	}
 
 	fromAddress := s.normalizeFromAddress(mailbox.Address)
+	if !input.IsDraft {
+		if err := s.ensureMailboxSendingIdentity(ctx, mailbox, fromAddress); err != nil {
+			return nil, err
+		}
+	}
 	email := database.Email{
 		AccountID:      accountID,
 		MailboxID:      input.MailboxID,
@@ -848,6 +1015,33 @@ func (s *EmailService) SendEmail(ctx context.Context, accountID uuid.UUID, input
 	}
 
 	return &email, nil
+}
+
+// ensureMailboxSendingIdentity keeps SES's account-wide identity namespace
+// from bypassing workspace ownership. The service's canonical mail host stays
+// available for its existing operator-managed identity; other addresses need a
+// verified workspace connection for the exact address or its domain.
+func (s *EmailService) ensureMailboxSendingIdentity(ctx context.Context, mailbox database.Mailbox, fromAddress string) error {
+	if s.identities == nil {
+		return nil
+	}
+	parts := strings.Split(fromAddress, "@")
+	if len(parts) != 2 || parts[1] == "" {
+		return fmt.Errorf("mailbox address must be a full email address when SES is enabled")
+	}
+	if strings.EqualFold(parts[1], s.domain) {
+		return nil
+	}
+	var count int64
+	if err := s.db.WithContext(ctx).Model(&database.MailConnection{}).
+		Where("workspace_id = ? AND provider = ? AND verified_for_sending_status = ? AND identity IN ?", mailbox.WorkspaceID, "ses", true, []string{strings.ToLower(fromAddress), strings.ToLower(parts[1])}).
+		Count(&count).Error; err != nil {
+		return err
+	}
+	if count == 0 {
+		return fmt.Errorf("a verified SES connection is required to send from %s", fromAddress)
+	}
+	return nil
 }
 
 func (s *EmailService) resolveThreadID(ctx context.Context, accountID uuid.UUID, requestedThreadID, replyToID string) (string, error) {

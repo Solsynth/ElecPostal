@@ -96,6 +96,7 @@ func New(cfg *config.Config) (*App, error) {
 			return nil, fmt.Errorf("configure SES relay: %w", err)
 		}
 		emailSvc.SetRelay(relay.NewLocalMXRouter(cfg.Mail.Relay.InboundHost, emailSvc.DeliverLocal, sesRelay))
+		emailSvc.SetIdentityManager(sesRelay)
 		logging.Log.Info().Str("adapter", "ses").Str("region", cfg.Mail.Relay.Region).Str("inbound_host", cfg.Mail.Relay.InboundHost).Msg("outbound relay configured")
 	default:
 		logging.Log.Warn().Str("adapter", cfg.Mail.Relay.Adapter).Msg("outbound relay is not configured; sent emails will not be delivered")

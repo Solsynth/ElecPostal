@@ -70,6 +70,70 @@ func RegisterRoutes(r *gin.RouterGroup, emailSvc *service.EmailService) {
 		credentials.POST("", func(c *gin.Context) { createMailCredential(c, emailSvc) })
 		credentials.DELETE("/:id", func(c *gin.Context) { deleteMailCredential(c, emailSvc) })
 	}
+
+	connections := r.Group("/mail-connections")
+	{
+		connections.GET("", func(c *gin.Context) { listMailConnections(c, emailSvc) })
+		connections.POST("", func(c *gin.Context) { createMailConnection(c, emailSvc) })
+		connections.POST("/:id/refresh", func(c *gin.Context) { refreshMailConnection(c, emailSvc) })
+		connections.DELETE("/:id", func(c *gin.Context) { deleteMailConnection(c, emailSvc) })
+	}
+}
+
+func listMailConnections(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	items, err := emailSvc.ListMailConnections(c.Request.Context(), uuid.MustParse(accountID), c.Query("workspace_id"))
+	if err != nil {
+		renderServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, items)
+}
+
+func createMailConnection(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	var input service.CreateMailConnectionInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	connection, err := emailSvc.CreateMailConnection(c.Request.Context(), uuid.MustParse(accountID), input)
+	if err != nil {
+		renderServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, connection)
+}
+
+func refreshMailConnection(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	connection, err := emailSvc.RefreshMailConnection(c.Request.Context(), uuid.MustParse(accountID), c.Param("id"))
+	if err != nil {
+		renderServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, connection)
+}
+
+func deleteMailConnection(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	if err := emailSvc.DeleteMailConnection(c.Request.Context(), uuid.MustParse(accountID), c.Param("id")); err != nil {
+		renderServiceError(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
 }
 
 func getMailboxQuota(c *gin.Context, emailSvc *service.EmailService) {
