@@ -174,7 +174,16 @@ func (m *imapMailbox) ListMessages(uid bool, set *goimap.SeqSet, items []goimap.
 		if !set.Contains(n) {
 			continue
 		}
-		msg := &goimap.Message{SeqNum: uint32(i + 1), Uid: x.UID, Flags: x.Flags, Size: uint32(len(x.Raw)), InternalDate: time.Now(), Body: map[*goimap.BodySectionName]goimap.Literal{}}
+		// NewMessage records the client's requested items and their ordering.
+		// Without it, go-imap formats FETCH responses as an empty list even
+		// though the mailbox correctly reports EXISTS, which makes clients show
+		// an apparently empty inbox.
+		msg := goimap.NewMessage(uint32(i+1), items)
+		msg.Uid = x.UID
+		msg.Flags = x.Flags
+		msg.Size = uint32(len(x.Raw))
+		msg.InternalDate = time.Now()
+		msg.Body = map[*goimap.BodySectionName]goimap.Literal{}
 		for _, item := range items {
 			for _, item = range item.Expand() {
 				if section, err := goimap.ParseBodySectionName(item); err == nil {
