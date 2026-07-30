@@ -26,6 +26,9 @@ func RegisterRoutes(r *gin.RouterGroup, emailSvc *service.EmailService) {
 		mailboxes.GET("/:id/aliases", func(c *gin.Context) { listMailboxAliases(c, emailSvc) })
 		mailboxes.POST("/:id/aliases", func(c *gin.Context) { createMailboxAlias(c, emailSvc) })
 		mailboxes.DELETE("/:id/aliases/:aliasID", func(c *gin.Context) { deleteMailboxAlias(c, emailSvc) })
+		mailboxes.GET("/:id/forwarding", func(c *gin.Context) { listMailForwardings(c, emailSvc) })
+		mailboxes.POST("/:id/forwarding", func(c *gin.Context) { createMailForwarding(c, emailSvc) })
+		mailboxes.DELETE("/:id/forwarding/:forwardingID", func(c *gin.Context) { deleteMailForwarding(c, emailSvc) })
 	}
 
 	emails := r.Group("/emails")
@@ -176,6 +179,49 @@ func deleteMailboxAlias(c *gin.Context, emailSvc *service.EmailService) {
 		return
 	}
 	if err := emailSvc.DeleteMailboxAlias(c.Request.Context(), uuid.MustParse(accountID), c.Param("id"), c.Param("aliasID")); err != nil {
+		renderServiceError(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+func listMailForwardings(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	forwardings, err := emailSvc.ListMailForwardings(c.Request.Context(), uuid.MustParse(accountID), c.Param("id"))
+	if err != nil {
+		renderServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, forwardings)
+}
+
+func createMailForwarding(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	var input service.CreateMailForwardingInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	forwarding, err := emailSvc.CreateMailForwarding(c.Request.Context(), uuid.MustParse(accountID), c.Param("id"), input)
+	if err != nil {
+		renderServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, forwarding)
+}
+
+func deleteMailForwarding(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	if err := emailSvc.DeleteMailForwarding(c.Request.Context(), uuid.MustParse(accountID), c.Param("id"), c.Param("forwardingID")); err != nil {
 		renderServiceError(c, err)
 		return
 	}

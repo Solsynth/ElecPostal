@@ -109,6 +109,9 @@ type ReceiveEmailInput struct {
 	// synthesized from the indexed fields.
 	RawSource    []byte
 	EnvelopeFrom string
+	// DeliveredTo contains envelope recipients for this mailbox. It drives alias
+	// forwarding even when the alias was BCC'd and absent from message headers.
+	DeliveredTo []string
 }
 
 // ListInput is pagination for list endpoints.
@@ -608,8 +611,12 @@ func (s *EmailService) DeleteMailboxAlias(ctx context.Context, accountID uuid.UU
 		return err
 	}
 	var forwardingCount int64
-	if err := s.db.WithContext(ctx).Model(&database.MailForwarding{}).Where("alias_id = ?", aliasID).Count(&forwardingCount).Error; err != nil { return err }
-	if forwardingCount > 0 { return fmt.Errorf("alias still has forwarding rules") }
+	if err := s.db.WithContext(ctx).Model(&database.MailForwarding{}).Where("alias_id = ?", aliasID).Count(&forwardingCount).Error; err != nil {
+		return err
+	}
+	if forwardingCount > 0 {
+		return fmt.Errorf("alias still has forwarding rules")
+	}
 	result := s.db.WithContext(ctx).Where("id = ? AND mailbox_id = ?", aliasID, mailbox.ID).Delete(&database.MailboxAlias{})
 	if result.Error != nil {
 		return result.Error
@@ -622,9 +629,13 @@ func (s *EmailService) DeleteMailboxAlias(ctx context.Context, accountID uuid.UU
 
 func (s *EmailService) ListMailForwardings(ctx context.Context, accountID uuid.UUID, mailboxID string) ([]database.MailForwarding, error) {
 	mailbox, err := s.authorizedMailbox(ctx, accountID, mailboxID)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	var forwardings []database.MailForwarding
-	if err := s.db.WithContext(ctx).Where("mailbox_id = ?", mailbox.ID).Order("created_at ASC").Find(&forwardings).Error; err != nil { return nil, err }
+	if err := s.db.WithContext(ctx).Where("mailbox_id = ?", mailbox.ID).Order("created_at ASC").Find(&forwardings).Error; err != nil {
+		return nil, err
+	}
 	return forwardings, nil
 }
 
@@ -632,33 +643,51 @@ func (s *EmailService) ListMailForwardings(ctx context.Context, accountID uuid.U
 // one external address. The original stays in the mailbox.
 func (s *EmailService) CreateMailForwarding(ctx context.Context, accountID uuid.UUID, mailboxID string, input CreateMailForwardingInput) (*database.MailForwarding, error) {
 	mailbox, err := s.authorizedMailbox(ctx, accountID, mailboxID)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	var alias database.MailboxAlias
 	if err := s.db.WithContext(ctx).Where("id = ? AND mailbox_id = ?", input.AliasID, mailbox.ID).First(&alias).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) { return nil, ErrNotFound }
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
 		return nil, err
 	}
 	destination, err := normalizeForwardDestination(input.Destination)
-	if err != nil { return nil, err }
-	if strings.EqualFold(destination, alias.Address) { return nil, fmt.Errorf("forward destination cannot be the source alias") }
+	if err != nil {
+		return nil, err
+	}
+	if strings.EqualFold(destination, alias.Address) {
+		return nil, fmt.Errorf("forward destination cannot be the source alias")
+	}
 	forwarding := database.MailForwarding{MailboxID: mailbox.ID, AliasID: alias.ID, Destination: destination}
-	if err := s.db.WithContext(ctx).Create(&forwarding).Error; err != nil { return nil, err }
+	if err := s.db.WithContext(ctx).Create(&forwarding).Error; err != nil {
+		return nil, err
+	}
 	return &forwarding, nil
 }
 
 func (s *EmailService) DeleteMailForwarding(ctx context.Context, accountID uuid.UUID, mailboxID, forwardingID string) error {
 	mailbox, err := s.authorizedMailbox(ctx, accountID, mailboxID)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	result := s.db.WithContext(ctx).Where("id = ? AND mailbox_id = ?", forwardingID, mailbox.ID).Delete(&database.MailForwarding{})
-	if result.Error != nil { return result.Error }
-	if result.RowsAffected == 0 { return ErrNotFound }
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrNotFound
+	}
 	return nil
 }
 
 func normalizeForwardDestination(value string) (string, error) {
 	value = strings.ToLower(strings.TrimSpace(value))
 	parsed, err := mail.ParseAddress(value)
-	if err != nil || parsed.Address != value { return "", fmt.Errorf("destination must be a valid email address") }
+	if err != nil || parsed.Address != value {
+		return "", fmt.Errorf("destination must be a valid email address")
+	}
 	return value, nil
 }
 
@@ -1388,6 +1417,7 @@ func (s *EmailService) DeliverLocal(ctx context.Context, message relay.Message, 
 			To:          localRecipientInputs(message.To, "to"),
 			Cc:          localRecipientInputs(message.Cc, "cc"),
 			SentAt:      &now,
+			DeliveredTo: []string{recipient},
 		}); err != nil {
 			return err
 		}
@@ -1507,31 +1537,45 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 		}
 	}
 	s.publishMailEvent(ctx, email.AccountID.String(), "mail.created", &email)
-	s.forwardIncomingEmail(ctx, mailbox, email, input.To)
+	forwardRecipients := input.DeliveredTo
+	if len(forwardRecipients) == 0 {
+		for _, recipient := range input.To {
+			forwardRecipients = append(forwardRecipients, recipient.Address)
+		}
+	}
+	s.forwardIncomingEmail(ctx, mailbox, email, forwardRecipients, len(attachments) > 0)
 	return &email, nil
 }
 
 // forwardIncomingEmail is deliberately best-effort: a forwarding failure never
 // rejects the original SMTP delivery. Attachments are not forwarded until a
 // relay attachment byte-source is configured, preventing silent data loss.
-func (s *EmailService) forwardIncomingEmail(ctx context.Context, mailbox database.Mailbox, email database.Email, recipients []RecipientInput) {
-	if s.relay == nil || len(recipients) == 0 || strings.HasPrefix(strings.ToLower(strings.TrimSpace(email.Subject)), "fwd:") { return }
+func (s *EmailService) forwardIncomingEmail(ctx context.Context, mailbox database.Mailbox, email database.Email, recipients []string, hasAttachments bool) {
+	if s.relay == nil || len(recipients) == 0 || strings.HasPrefix(strings.ToLower(strings.TrimSpace(email.Subject)), "fwd:") {
+		return
+	}
 	addresses := make([]string, 0, len(recipients))
-	for _, recipient := range recipients { addresses = append(addresses, strings.ToLower(strings.TrimSpace(recipient.Address))) }
+	for _, recipient := range recipients {
+		addresses = append(addresses, strings.ToLower(strings.TrimSpace(recipient)))
+	}
 	var aliases []database.MailboxAlias
 	if err := s.db.WithContext(ctx).Where("mailbox_id = ? AND LOWER(address) IN ?", mailbox.ID, addresses).Find(&aliases).Error; err != nil || len(aliases) == 0 {
-		if err != nil { logging.Log.Warn().Err(err).Str("email_id", email.ID).Msg("look up forwarding aliases") }
+		if err != nil {
+			logging.Log.Warn().Err(err).Str("email_id", email.ID).Msg("look up forwarding aliases")
+		}
 		return
 	}
 	aliasByID := make(map[string]database.MailboxAlias, len(aliases))
 	aliasIDs := make([]string, 0, len(aliases))
-	for _, alias := range aliases { aliasByID[alias.ID], aliasIDs = alias, append(aliasIDs, alias.ID) }
+	for _, alias := range aliases {
+		aliasByID[alias.ID], aliasIDs = alias, append(aliasIDs, alias.ID)
+	}
 	var rules []database.MailForwarding
 	if err := s.db.WithContext(ctx).Where("alias_id IN ?", aliasIDs).Find(&rules).Error; err != nil {
 		logging.Log.Warn().Err(err).Str("email_id", email.ID).Msg("look up mail forwarding rules")
 		return
 	}
-	if len(email.Attachments) > 0 {
+	if hasAttachments {
 		logging.Log.Warn().Str("email_id", email.ID).Msg("skipped forwarding email with attachments; relay attachment source is unavailable")
 		return
 	}
@@ -1539,14 +1583,18 @@ func (s *EmailService) forwardIncomingEmail(ctx context.Context, mailbox databas
 	for _, rule := range rules {
 		alias := aliasByID[rule.AliasID]
 		key := alias.Address + "\x00" + rule.Destination
-		if _, ok := sent[key]; ok { continue }
+		if _, ok := sent[key]; ok {
+			continue
+		}
 		sent[key] = struct{}{}
 		if err := s.ensureMailboxSendingIdentity(ctx, mailbox, alias.Address); err != nil {
 			logging.Log.Warn().Err(err).Str("email_id", email.ID).Str("alias", alias.Address).Msg("skipped forwarding from unverified custom domain")
 			continue
 		}
 		name := alias.Name
-		if name == "" { name = mailbox.Name }
+		if name == "" {
+			name = mailbox.Name
+		}
 		message := relay.Message{FromAddress: alias.Address, FromName: name, To: []string{rule.Destination}, Subject: "Fwd: " + email.Subject, Body: forwardedBody(email), ContentType: "text/plain", ThreadID: dereferenceString(email.ThreadID)}
 		if _, err := s.relay.Send(ctx, message); err != nil {
 			logging.Log.Warn().Err(err).Str("email_id", email.ID).Str("destination", rule.Destination).Msg("failed to forward email")

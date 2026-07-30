@@ -134,6 +134,26 @@ outbound message to send from it:
 {"mailbox_id":"01J...","from_alias_id":"01J...","to":[{"address":"recipient@example.net"}]}
 ```
 
+### Alias forwarding
+
+Forward mail received through an alias to an external address while retaining
+the original in the mailbox:
+
+`POST /api/mailboxes/{mailbox-id}/forwarding`
+
+```json
+{
+  "alias_id": "01J...",
+  "destination": "owner@elsewhere.example"
+}
+```
+
+Forwarded messages are sent from the alias and use a `Fwd:` subject to prevent
+simple forwarding loops. List rules with `GET /api/mailboxes/{mailbox-id}/forwarding`
+and remove one with `DELETE /api/mailboxes/{mailbox-id}/forwarding/{rule-id}`.
+Attachments are retained in the original mailbox but are not forwarded until a
+relay attachment byte-source is configured.
+
 ### Mailbox email quota
 
 `GET /api/mailboxes/{mailbox-id}/quota`

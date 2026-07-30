@@ -73,7 +73,9 @@ type MailForwarding struct {
 }
 
 func (f *MailForwarding) BeforeCreate(tx *gorm.DB) error {
-	if f.ID == "" { f.ID = NewID() }
+	if f.ID == "" {
+		f.ID = NewID()
+	}
 	return nil
 }
 

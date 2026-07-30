@@ -175,7 +175,13 @@ func deliverJob(ctx context.Context, backend Backend, job deliveryJob) error {
 		for _, attachment := range job.Attachments {
 			attachments = append(attachments, service.IncomingAttachment{Filename: attachment.Filename, MimeType: attachment.MimeType, Size: int64(len(attachment.Content)), ContentID: attachment.ContentID, Disposition: attachment.Disposition, Content: bytes.NewReader(attachment.Content)})
 		}
-		if _, err := backend.ReceiveEmail(ctx, service.ReceiveEmailInput{MailboxID: recipient.mailboxID, FromAddress: job.FromAddress, FromName: job.FromName, Subject: job.Subject, Body: job.Body, ContentType: job.ContentType, To: job.To, Cc: job.Cc, Attachments: attachments, SentAt: &job.ReceivedAt, Authentication: job.Authentication, RawSource: job.RawSource, EnvelopeFrom: job.EnvelopeFrom}); err != nil {
+		deliveredTo := make([]string, 0)
+		for _, candidate := range job.Recipients {
+			if candidate.mailboxID == recipient.mailboxID {
+				deliveredTo = append(deliveredTo, candidate.address)
+			}
+		}
+		if _, err := backend.ReceiveEmail(ctx, service.ReceiveEmailInput{MailboxID: recipient.mailboxID, FromAddress: job.FromAddress, FromName: job.FromName, Subject: job.Subject, Body: job.Body, ContentType: job.ContentType, To: job.To, Cc: job.Cc, Attachments: attachments, SentAt: &job.ReceivedAt, Authentication: job.Authentication, RawSource: job.RawSource, EnvelopeFrom: job.EnvelopeFrom, DeliveredTo: deliveredTo}); err != nil {
 			return err
 		}
 	}
