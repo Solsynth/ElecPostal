@@ -74,6 +74,15 @@ service uses GORM `AutoMigrate` on startup. The provided `docker-compose.yml`
 starts PostgreSQL, JetStream, Redis, and ElecPostal. Configure TLS certificates
 for all enabled SMTP, IMAP, and POP3 listeners.
 
+## JMAP
+
+JMAP is available over the main HTTPS listener at `GET /jmap/session` and
+`POST /jmap/api`. It uses the same bearer-token authentication as the REST API.
+Each hosted address is a JMAP account and IMAP folders are JMAP Mailboxes.
+This initial support includes `Core/echo`, `Mailbox/get`, `Mailbox/query`,
+`Email/get`, `Email/query`, and `Email/set` for flags, moves, and trashing.
+JMAP reads and updates the same message state as IMAP and POP3.
+
 ## Outbound delivery
 
 Set `mail.relay.adapter = "direct-smtp"` to deliver directly to recipient MX

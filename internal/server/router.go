@@ -10,6 +10,7 @@ import (
 	"src.solsynth.dev/sosys/elecpostal/internal/config"
 	"src.solsynth.dev/sosys/elecpostal/internal/handler"
 	"src.solsynth.dev/sosys/elecpostal/internal/identity"
+	"src.solsynth.dev/sosys/elecpostal/internal/jmap"
 	"src.solsynth.dev/sosys/elecpostal/internal/logging"
 	"src.solsynth.dev/sosys/elecpostal/internal/service"
 )
@@ -23,6 +24,11 @@ func NewRouter(cfg *config.Config, emailSvc *service.EmailService) *gin.Engine {
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"ok": true, "service": "elecpostal"})
 	})
+
+	// JMAP uses fixed discovery/API paths rather than the REST /api namespace.
+	jmapHandler := jmap.New(emailSvc)
+	r.GET("/jmap/session", jmapHandler.Session)
+	r.POST("/jmap/api", jmapHandler.API)
 
 	api := r.Group("/api")
 	handler.RegisterRoutes(api, emailSvc)
