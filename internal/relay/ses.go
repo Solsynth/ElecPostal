@@ -26,11 +26,13 @@ type sesClient interface {
 	CreateEmailIdentity(context.Context, *sesv2.CreateEmailIdentityInput, ...func(*sesv2.Options)) (*sesv2.CreateEmailIdentityOutput, error)
 	GetEmailIdentity(context.Context, *sesv2.GetEmailIdentityInput, ...func(*sesv2.Options)) (*sesv2.GetEmailIdentityOutput, error)
 	DeleteEmailIdentity(context.Context, *sesv2.DeleteEmailIdentityInput, ...func(*sesv2.Options)) (*sesv2.DeleteEmailIdentityOutput, error)
+	PutEmailIdentityMailFromAttributes(context.Context, *sesv2.PutEmailIdentityMailFromAttributesInput, ...func(*sesv2.Options)) (*sesv2.PutEmailIdentityMailFromAttributesOutput, error)
 }
 
 // SESAdapter sends outbound mail with the AWS SES API v2.
 type SESAdapter struct {
 	client sesClient
+	region string
 }
 
 func NewSESAdapter(ctx context.Context, cfg SESConfig) (*SESAdapter, error) {
@@ -41,7 +43,7 @@ func NewSESAdapter(ctx context.Context, cfg SESConfig) (*SESAdapter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load AWS configuration: %w", err)
 	}
-	return &SESAdapter{client: sesv2.NewFromConfig(awsCfg)}, nil
+	return &SESAdapter{client: sesv2.NewFromConfig(awsCfg), region: cfg.Region}, nil
 }
 
 func (a *SESAdapter) Send(ctx context.Context, message Message) (DeliveryResult, error) {
@@ -87,28 +89,59 @@ func sesMessage(message Message) *types.Message {
 
 func (a *SESAdapter) Close() error { return nil }
 
-// CreateIdentity starts SES verification. Domains use Easy DKIM and return the
-// three CNAME records that must be published; email-address identities receive
-// an SES verification email instead.
+// CreateIdentity starts SES verification. Domains use Easy DKIM, get a custom
+// bounce.<domain> MAIL FROM subdomain, and return the DKIM CNAME records plus
+// the MAIL FROM MX and SPF TXT records that must be published; email-address
+// identities receive an SES verification email instead.
 func (a *SESAdapter) CreateIdentity(ctx context.Context, identity string) (IdentityStatus, error) {
 	output, err := a.client.CreateEmailIdentity(ctx, &sesv2.CreateEmailIdentityInput{EmailIdentity: aws.String(identity)})
 	if err != nil {
 		return IdentityStatus{}, fmt.Errorf("create SES email identity: %w", err)
 	}
+	mailFromDomain := ""
+	mailFromStatus := ""
+	if output.IdentityType == types.IdentityTypeDomain {
+		if err := a.EnsureMailFrom(ctx, identity); err != nil {
+			return IdentityStatus{}, err
+		}
+		mailFromDomain = "bounce." + identity
+		mailFromStatus = "PENDING"
+	}
 	verificationStatus := "PENDING"
 	if output.VerifiedForSendingStatus {
 		verificationStatus = "SUCCESS"
 	}
-	return sesIdentityStatus(identity, string(output.IdentityType), verificationStatus, output.VerifiedForSendingStatus, output.DkimAttributes), nil
+	return sesIdentityStatus(a.region, identity, string(output.IdentityType), verificationStatus, output.VerifiedForSendingStatus, output.DkimAttributes, mailFromDomain, mailFromStatus), nil
 }
 
-// GetIdentity refreshes identity verification and Easy DKIM state from SES.
+// EnsureMailFrom idempotently configures a bounce.<identity> custom MAIL FROM
+// domain. Existing identities keep their current MAIL FROM domain; a missing
+// MX record falls back to amazonses.com instead of rejecting mail.
+func (a *SESAdapter) EnsureMailFrom(ctx context.Context, identity string) error {
+	if _, err := a.client.PutEmailIdentityMailFromAttributes(ctx, &sesv2.PutEmailIdentityMailFromAttributesInput{
+		EmailIdentity:       aws.String(identity),
+		MailFromDomain:      aws.String("bounce." + identity),
+		BehaviorOnMxFailure: types.BehaviorOnMxFailureUseDefaultValue,
+	}); err != nil {
+		return fmt.Errorf("configure SES MAIL FROM domain: %w", err)
+	}
+	return nil
+}
+
+// GetIdentity refreshes identity verification, Easy DKIM, and MAIL FROM state
+// from SES.
 func (a *SESAdapter) GetIdentity(ctx context.Context, identity string) (IdentityStatus, error) {
 	output, err := a.client.GetEmailIdentity(ctx, &sesv2.GetEmailIdentityInput{EmailIdentity: aws.String(identity)})
 	if err != nil {
 		return IdentityStatus{}, fmt.Errorf("get SES email identity: %w", err)
 	}
-	return sesIdentityStatus(identity, string(output.IdentityType), string(output.VerificationStatus), output.VerifiedForSendingStatus, output.DkimAttributes), nil
+	mailFromDomain := ""
+	mailFromStatus := ""
+	if output.MailFromAttributes != nil {
+		mailFromDomain = aws.ToString(output.MailFromAttributes.MailFromDomain)
+		mailFromStatus = string(output.MailFromAttributes.MailFromDomainStatus)
+	}
+	return sesIdentityStatus(a.region, identity, string(output.IdentityType), string(output.VerificationStatus), output.VerifiedForSendingStatus, output.DkimAttributes, mailFromDomain, mailFromStatus), nil
 }
 
 // DeleteIdentity removes an SES identity. Callers must first ensure that no
@@ -120,18 +153,25 @@ func (a *SESAdapter) DeleteIdentity(ctx context.Context, identity string) error 
 	return nil
 }
 
-func sesIdentityStatus(identity, identityType, verificationStatus string, verified bool, dkim *types.DkimAttributes) IdentityStatus {
+func sesIdentityStatus(region, identity, identityType, verificationStatus string, verified bool, dkim *types.DkimAttributes, mailFromDomain, mailFromStatus string) IdentityStatus {
 	status := IdentityStatus{Identity: identity, IdentityType: identityType, VerificationStatus: verificationStatus, VerifiedForSendingStatus: verified}
-	if dkim == nil {
-		return status
+	if dkim != nil {
+		status.DKIMStatus = string(dkim.Status)
+		for _, token := range dkim.Tokens {
+			status.DNSRecords = append(status.DNSRecords, DNSRecord{
+				Name:  token + "._domainkey." + identity,
+				Type:  "CNAME",
+				Value: token + ".dkim.amazonses.com",
+			})
+		}
 	}
-	status.DKIMStatus = string(dkim.Status)
-	for _, token := range dkim.Tokens {
-		status.DNSRecords = append(status.DNSRecords, DNSRecord{
-			Name:  token + "._domainkey." + identity,
-			Type:  "CNAME",
-			Value: token + ".dkim.amazonses.com",
-		})
+	if mailFromDomain != "" {
+		status.MailFromDomain = mailFromDomain
+		status.MailFromStatus = mailFromStatus
+		status.DNSRecords = append(status.DNSRecords,
+			DNSRecord{Name: mailFromDomain, Type: "MX", Value: "10 feedback-smtp." + region + ".amazonses.com"},
+			DNSRecord{Name: mailFromDomain, Type: "TXT", Value: "v=spf1 include:amazonses.com ~all"},
+		)
 	}
 	return status
 }

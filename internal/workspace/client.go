@@ -22,6 +22,7 @@ type Provider interface {
 	AuthorizeMember(context.Context, string, string) error
 	PlanStorageBytes(context.Context, string) (int64, error)
 	MailboxLimit(context.Context, string) (int64, error)
+	CustomDomainLimit(context.Context, string) (int64, error)
 	SendLimits(context.Context, string) (SendLimits, error)
 	Close() error
 }
@@ -116,6 +117,16 @@ func (c *Client) MailboxLimit(ctx context.Context, workspaceID string) (int64, e
 	return mailboxLimitForPlan(workspace.GetPlan()), nil
 }
 
+// CustomDomainLimit returns the maximum number of SES custom domains permitted
+// by a workspace plan: Free 0, Pro 1, and Enterprise 3.
+func (c *Client) CustomDomainLimit(ctx context.Context, workspaceID string) (int64, error) {
+	workspace, err := c.getWorkspace(ctx, workspaceID)
+	if err != nil {
+		return 0, err
+	}
+	return customDomainLimitForPlan(workspace.GetPlan()), nil
+}
+
 func (c *Client) SendLimits(ctx context.Context, workspaceID string) (SendLimits, error) {
 	workspace, err := c.getWorkspace(ctx, workspaceID)
 	if err != nil {
@@ -147,6 +158,17 @@ func mailboxLimitForPlan(plan gen.DyWorkspacePlan) int64 {
 		return 3
 	default:
 		return 1
+	}
+}
+
+func customDomainLimitForPlan(plan gen.DyWorkspacePlan) int64 {
+	switch plan {
+	case gen.DyWorkspacePlan_ENTERPRISE:
+		return 3
+	case gen.DyWorkspacePlan_PRO:
+		return 1
+	default:
+		return 0
 	}
 }
 

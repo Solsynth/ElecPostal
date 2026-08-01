@@ -120,7 +120,24 @@ next day or month begins.
 When the server is configured with `mail.relay.adapter = "ses"`, workspace
 members can connect an SES custom domain without submitting AWS secrets. The
 service uses its configured AWS SDK credential chain, so the IAM role needs
-`ses:CreateEmailIdentity`, `ses:GetEmailIdentity`, and `ses:DeleteEmailIdentity`.
+`ses:CreateEmailIdentity`, `ses:GetEmailIdentity`, `ses:DeleteEmailIdentity`,
+and `ses:PutEmailIdentityMailFromAttributes`.
+
+Workspace plans limit the number of custom domains: Free allows 0, Pro allows
+1, and Enterprise allows 3. Creating a domain beyond the limit fails with the
+`workspace custom domain limit exceeded` error.
+
+`GET /api/workspaces/{workspace-id}/custom-domain-usage` returns how many of
+the plan's custom domains a workspace has connected:
+
+```json
+{
+  "workspace_id": "01J...",
+  "used": 1,
+  "limit": 1,
+  "remaining": 0
+}
+```
 
 ### Add a custom domain
 
@@ -133,9 +150,16 @@ service uses its configured AWS SDK credential chain, so the IAM role needs
 }
 ```
 
-The result contains the Easy DKIM CNAME records under `dns_records`; publish
-all of them, then refresh the custom domain. Custom domains use SES Easy DKIM
-verification.
+The result contains the records to publish under `dns_records`, then refresh
+the custom domain:
+
+- Three Easy DKIM CNAME records for DKIM signing.
+- An MX record and an SPF TXT record for a custom `bounce.example.com`
+  MAIL FROM subdomain, so SES uses your domain in the return-path instead of
+  `amazonses.com`.
+
+Publish all of them. Custom domains use SES Easy DKIM verification and SES
+provisioning for the custom MAIL FROM domain.
 
 ```json
 {
@@ -144,18 +168,23 @@ verification.
   "domain": "example.com",
   "verification_status": "PENDING",
   "verified_for_sending_status": false,
+  "dkim_status": "PENDING",
+  "mail_from_domain": "bounce.example.com",
+  "mail_from_status": "PENDING",
   "dns_records": [
-    {"name":"token._domainkey.example.com","type":"CNAME","value":"token.dkim.amazonses.com"}
+    {"name":"token._domainkey.example.com","type":"CNAME","value":"token.dkim.amazonses.com"},
+    {"name":"bounce.example.com","type":"MX","value":"10 feedback-smtp.us-east-1.amazonses.com"},
+    {"name":"bounce.example.com","type":"TXT","value":"v=spf1 include:amazonses.com ~all"}
   ]
 }
 ```
 
 `GET /api/custom-domains?workspace_id={workspace-id}` lists domains.
-`POST /api/custom-domains/{id}/refresh` fetches the latest SES verification
-and DKIM status. `DELETE /api/custom-domains/{id}` removes the custom domain
-from SES after all of its aliases are removed. Non-draft custom-domain sends
-require a verified custom domain in the mailbox's workspace. The configured
-canonical `mail.domain` remains operator-managed.
+`POST /api/custom-domains/{id}/refresh` fetches the latest SES verification,
+Easy DKIM, and MAIL FROM status. `DELETE /api/custom-domains/{id}` removes the
+custom domain from SES after all of its aliases are removed. Non-draft
+custom-domain sends require a verified custom domain in the mailbox's
+workspace. The configured canonical `mail.domain` remains operator-managed.
 
 ### Mailbox aliases
 

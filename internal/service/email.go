@@ -24,11 +24,12 @@ import (
 )
 
 var (
-	ErrNotFound             = errors.New("not found")
-	ErrForbidden            = errors.New("forbidden")
-	ErrWorkspaceUnavailable = errors.New("workspace quota service is not configured")
-	ErrMailboxLimitExceeded = errors.New("workspace mailbox limit exceeded")
-	ErrSendLimitExceeded    = errors.New("outbound email send limit exceeded")
+	ErrNotFound                  = errors.New("not found")
+	ErrForbidden                 = errors.New("forbidden")
+	ErrWorkspaceUnavailable      = errors.New("workspace quota service is not configured")
+	ErrMailboxLimitExceeded      = errors.New("workspace mailbox limit exceeded")
+	ErrCustomDomainLimitExceeded = errors.New("workspace custom domain limit exceeded")
+	ErrSendLimitExceeded         = errors.New("outbound email send limit exceeded")
 )
 
 var reservedMailboxLocalParts = map[string]struct{}{
@@ -219,6 +220,15 @@ type WorkspaceSendUsage struct {
 	WorkspaceID string    `json:"workspace_id"`
 	Daily       SendUsage `json:"daily"`
 	Monthly     SendUsage `json:"monthly"`
+}
+
+// WorkspaceCustomDomainUsage reports how many SES custom domains a workspace
+// has connected against its plan limit.
+type WorkspaceCustomDomainUsage struct {
+	WorkspaceID string `json:"workspace_id"`
+	Used        int64  `json:"used"`
+	Limit       int64  `json:"limit"`
+	Remaining   int64  `json:"remaining"`
 }
 
 // EmailService handles email-related business logic.
@@ -419,6 +429,17 @@ func (s *EmailService) CreateCustomDomain(ctx context.Context, accountID uuid.UU
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, err
 	}
+	domainLimit, err := s.workspace.CustomDomainLimit(ctx, strings.TrimSpace(input.WorkspaceID))
+	if err != nil {
+		return nil, fmt.Errorf("get workspace custom domain limit: %w", err)
+	}
+	var domainCount int64
+	if err := s.db.WithContext(ctx).Model(&database.CustomDomain{}).Where("workspace_id = ?", input.WorkspaceID).Count(&domainCount).Error; err != nil {
+		return nil, err
+	}
+	if domainCount >= domainLimit {
+		return nil, fmt.Errorf("%w: limit=%d", ErrCustomDomainLimitExceeded, domainLimit)
+	}
 	status, err := s.identities.CreateIdentity(ctx, domain)
 	if err != nil {
 		return nil, err
@@ -508,6 +529,17 @@ func (s *EmailService) refreshCustomDomain(ctx context.Context, domain *database
 	if err != nil {
 		return nil, err
 	}
+	// Provision the custom MAIL FROM subdomain for domains created before it
+	// was supported, so refresh upgrades them without a full re-create.
+	if status.IdentityType == "DOMAIN" && status.MailFromDomain == "" {
+		if err := s.identities.EnsureMailFrom(ctx, domain.Domain); err != nil {
+			return nil, err
+		}
+		status, err = s.identities.GetIdentity(ctx, domain.Domain)
+		if err != nil {
+			return nil, err
+		}
+	}
 	applyCustomDomainStatus(domain, status)
 	if err := s.db.WithContext(ctx).Save(domain).Error; err != nil {
 		return nil, err
@@ -520,6 +552,8 @@ func applyCustomDomainStatus(domain *database.CustomDomain, status relay.Identit
 	domain.VerificationStatus = status.VerificationStatus
 	domain.VerifiedForSendingStatus = status.VerifiedForSendingStatus
 	domain.DKIMStatus = status.DKIMStatus
+	domain.MailFromDomain = status.MailFromDomain
+	domain.MailFromStatus = status.MailFromStatus
 	records, _ := json.Marshal(status.DNSRecords)
 	domain.DNSRecords = datatypes.JSON(records)
 }
@@ -1105,6 +1139,34 @@ func (s *EmailService) GetWorkspaceMailboxUsage(ctx context.Context, accountID u
 		remaining = 0
 	}
 	return WorkspaceMailboxUsage{WorkspaceID: workspaceID, Used: used, Limit: limit, Remaining: remaining}, nil
+}
+
+// GetWorkspaceCustomDomainUsage returns the current custom domain count and
+// its plan limit for a workspace.
+func (s *EmailService) GetWorkspaceCustomDomainUsage(ctx context.Context, accountID uuid.UUID, workspaceID string) (WorkspaceCustomDomainUsage, error) {
+	workspaceID = strings.TrimSpace(workspaceID)
+	if workspaceID == "" {
+		return WorkspaceCustomDomainUsage{}, fmt.Errorf("workspace_id is required")
+	}
+	if err := s.authorizeWorkspaceMember(ctx, workspaceID, accountID); err != nil {
+		return WorkspaceCustomDomainUsage{}, err
+	}
+	if s.workspace == nil {
+		return WorkspaceCustomDomainUsage{}, ErrWorkspaceUnavailable
+	}
+	limit, err := s.workspace.CustomDomainLimit(ctx, workspaceID)
+	if err != nil {
+		return WorkspaceCustomDomainUsage{}, fmt.Errorf("get workspace custom domain limit: %w", err)
+	}
+	var used int64
+	if err := s.db.WithContext(ctx).Model(&database.CustomDomain{}).Where("workspace_id = ?", workspaceID).Count(&used).Error; err != nil {
+		return WorkspaceCustomDomainUsage{}, fmt.Errorf("count workspace custom domains: %w", err)
+	}
+	remaining := limit - used
+	if remaining < 0 {
+		remaining = 0
+	}
+	return WorkspaceCustomDomainUsage{WorkspaceID: workspaceID, Used: used, Limit: limit, Remaining: remaining}, nil
 }
 
 // GetWorkspaceSendUsage returns the workspace-scoped outbound send usage for

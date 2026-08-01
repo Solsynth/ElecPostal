@@ -22,6 +22,22 @@ func TestMailboxLimitForPlan(t *testing.T) {
 	}
 }
 
+func TestCustomDomainLimitForPlan(t *testing.T) {
+	tests := []struct {
+		plan gen.DyWorkspacePlan
+		want int64
+	}{
+		{gen.DyWorkspacePlan_FREE, 0},
+		{gen.DyWorkspacePlan_PRO, 1},
+		{gen.DyWorkspacePlan_ENTERPRISE, 3},
+	}
+	for _, test := range tests {
+		if got := customDomainLimitForPlan(test.plan); got != test.want {
+			t.Errorf("customDomainLimitForPlan(%s) = %d, want %d", test.plan, got, test.want)
+		}
+	}
+}
+
 func TestDefaultSendLimitPolicy(t *testing.T) {
 	policy := DefaultSendLimitPolicy()
 	if got := policy.Free; got.MailboxDaily != 100 || got.MailboxMonthly != 2000 || got.WorkspaceDaily != 100 || got.WorkspaceMonthly != 2000 {

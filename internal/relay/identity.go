@@ -19,6 +19,8 @@ type IdentityStatus struct {
 	VerificationStatus       string      `json:"verification_status"`
 	VerifiedForSendingStatus bool        `json:"verified_for_sending_status"`
 	DKIMStatus               string      `json:"dkim_status,omitempty"`
+	MailFromDomain           string      `json:"mail_from_domain,omitempty"`
+	MailFromStatus           string      `json:"mail_from_status,omitempty"`
 	DNSRecords               []DNSRecord `json:"dns_records,omitempty"`
 }
 
@@ -29,6 +31,7 @@ type IdentityManager interface {
 	CreateIdentity(context.Context, string) (IdentityStatus, error)
 	GetIdentity(context.Context, string) (IdentityStatus, error)
 	DeleteIdentity(context.Context, string) error
+	EnsureMailFrom(context.Context, string) error
 }
 
 var ErrIdentityManagementUnavailable = errors.New("mail relay identity management is not configured")

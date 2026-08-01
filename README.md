@@ -97,9 +97,9 @@ chain (for example, an IAM role, `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, or
 an AWS shared profile). SES SMTP credentials and `mail.relay.host` are not used
 by this adapter. The same adapter supports workspace-owned custom domains
 through `/api/custom-domains`; grant its IAM principal
-`ses:CreateEmailIdentity`, `ses:GetEmailIdentity`, and `ses:DeleteEmailIdentity`
-in addition to the send permission. AWS credentials are never sent by clients
-or stored in ElecPostal.
+`ses:CreateEmailIdentity`, `ses:GetEmailIdentity`, `ses:DeleteEmailIdentity`,
+and `ses:PutEmailIdentityMailFromAttributes` in addition to the send
+permission. AWS credentials are never sent by clients or stored in ElecPostal.
 
 For either adapter, set `mail.relay.inboundHost` to this service's public MX
 hostname. If DNS resolves a recipient domain to that host, ElecPostal stores

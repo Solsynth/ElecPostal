@@ -89,6 +89,7 @@ func RegisterRoutes(r *gin.RouterGroup, emailSvc *service.EmailService) {
 	{
 		workspaces.GET("/:id/mailbox-usage", func(c *gin.Context) { getWorkspaceMailboxUsage(c, emailSvc) })
 		workspaces.GET("/:id/send-usage", func(c *gin.Context) { getWorkspaceSendUsage(c, emailSvc) })
+		workspaces.GET("/:id/custom-domain-usage", func(c *gin.Context) { getWorkspaceCustomDomainUsage(c, emailSvc) })
 	}
 }
 
@@ -266,6 +267,19 @@ func getWorkspaceSendUsage(c *gin.Context, emailSvc *service.EmailService) {
 		return
 	}
 	usage, err := emailSvc.GetWorkspaceSendUsage(c.Request.Context(), uuid.MustParse(accountID), c.Param("id"))
+	if err != nil {
+		renderServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, usage)
+}
+
+func getWorkspaceCustomDomainUsage(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	usage, err := emailSvc.GetWorkspaceCustomDomainUsage(c.Request.Context(), uuid.MustParse(accountID), c.Param("id"))
 	if err != nil {
 		renderServiceError(c, err)
 		return
