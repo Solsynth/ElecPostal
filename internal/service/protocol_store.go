@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -281,7 +282,8 @@ func (s *EmailService) AppendProtocolMessage(ctx context.Context, mailboxID, fol
 
 	var uid uint32
 	var modSeq uint64
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	var err error
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&email).Error; err != nil {
 			return err
 		}

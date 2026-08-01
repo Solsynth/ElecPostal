@@ -28,6 +28,7 @@ type Backend interface {
 	AuthenticateMailProtocolAddress(context.Context, string, string, string) (*service.ProtocolPrincipal, error)
 	ListProtocolFolder(context.Context, string, string) ([]service.ProtocolMessage, *database.MailFolder, error)
 	ListProtocolFolders(context.Context, string) ([]database.MailFolder, error)
+	AppendProtocolMessage(context.Context, string, string, []byte, []string, time.Time) (uint32, uint64, error)
 	MoveProtocolMessages(context.Context, string, string, string, []string) error
 	CopyProtocolMessages(context.Context, string, string, string, []string) error
 	StoreProtocolFlags(context.Context, string, string, []string, []string, string, uint64) ([]service.ProtocolStoreResult, error)
@@ -260,8 +261,18 @@ func (m *imapMailbox) SearchMessages(uid bool, c *goimap.SearchCriteria) ([]uint
 	}
 	return out, nil
 }
-func (m *imapMailbox) CreateMessage([]string, time.Time, goimap.Literal) error {
-	return fmt.Errorf("APPEND is not supported")
+func (m *imapMailbox) CreateMessage(flags []string, date time.Time, body goimap.Literal) error {
+	raw, err := io.ReadAll(body)
+	if err != nil {
+		return err
+	}
+	if date.IsZero() {
+		date = time.Now()
+	}
+	if _, _, err := m.user.backend.AppendProtocolMessage(context.Background(), m.user.mailboxID, m.name, raw, flags, date); err != nil {
+		return err
+	}
+	return nil
 }
 func (m *imapMailbox) UpdateMessagesFlags(uid bool, set *goimap.SeqSet, op goimap.FlagsOp, flags []string) error {
 	msgs, _, err := m.messages()
