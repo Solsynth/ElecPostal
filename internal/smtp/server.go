@@ -25,6 +25,7 @@ import (
 
 	"src.solsynth.dev/sosys/elecpostal/internal/config"
 	"src.solsynth.dev/sosys/elecpostal/internal/database"
+	"src.solsynth.dev/sosys/elecpostal/internal/relay"
 	"src.solsynth.dev/sosys/elecpostal/internal/service"
 )
 
@@ -40,6 +41,7 @@ type Backend interface {
 	ResolveLocalMailbox(context.Context, string) (*database.Mailbox, error)
 	AuthenticateMailProtocolAddress(context.Context, string, string, string) (*service.ProtocolPrincipal, error)
 	ReceiveEmail(context.Context, service.ReceiveEmailInput) (*database.Email, error)
+	SendOutbound(context.Context, relay.Message) error
 }
 
 // Server owns the library server and its listener. Protocol parsing, ESMTP
@@ -180,11 +182,21 @@ func (ss *smtpSession) Mail(from string, _ *gosmtp.MailOptions) error {
 	return nil
 }
 func (ss *smtpSession) Rcpt(to string, _ *gosmtp.RcptOptions) error {
-	box, err := ss.server.service.ResolveLocalMailbox(context.Background(), strings.ToLower(to))
-	if err != nil {
+	address := strings.ToLower(strings.TrimSpace(to))
+	box, err := ss.server.service.ResolveLocalMailbox(context.Background(), address)
+	if err == nil {
+		ss.recipients = append(ss.recipients, recipient{address: address, mailboxID: box.ID})
+		return nil
+	}
+	if !errors.Is(err, service.ErrNotFound) {
+		return &gosmtp.SMTPError{Code: 451, EnhancedCode: gosmtp.EnhancedCode{4, 3, 0}, Message: "Temporary recipient lookup failure"}
+	}
+	// Relay is restricted to authenticated submission sessions so the MX port
+	// never becomes an open relay for unauthenticated senders.
+	if ss.principal == nil || ss.principal.MailboxID == "" {
 		return &gosmtp.SMTPError{Code: 550, EnhancedCode: gosmtp.EnhancedCode{5, 1, 1}, Message: "User unknown"}
 	}
-	ss.recipients = append(ss.recipients, recipient{address: strings.ToLower(to), mailboxID: box.ID})
+	ss.recipients = append(ss.recipients, recipient{address: address, mailboxID: ""})
 	return nil
 }
 func (ss *smtpSession) Data(r io.Reader) error {
@@ -196,11 +208,87 @@ func (ss *smtpSession) Data(r io.Reader) error {
 	if err != nil {
 		return err
 	}
+	if ss.principal != nil && ss.principal.MailboxID != "" {
+		if err := ss.submit(message, raw); err != nil {
+			return err
+		}
+		ss.Reset()
+		return nil
+	}
 	if err := ss.server.delivery.Enqueue(context.Background(), newDeliveryJob(message, raw, ss.from, ss.recipients)); err != nil {
 		return err
 	}
 	ss.Reset()
 	return nil
+}
+
+// submit handles SMTP submission from an authenticated mailbox. Local
+// recipients are stored in their INBOX while external recipients are relayed
+// through the configured provider. The client keeps its own Sent copy via IMAP
+// APPEND, so no duplicate is created here.
+func (ss *smtpSession) submit(message parsedMessage, raw []byte) error {
+	local := make([]recipient, 0, len(ss.recipients))
+	var external relay.Message
+	external.FromAddress, external.FromName = message.fromAddress, message.fromName
+	external.Subject, external.Body, external.ContentType = message.subject, message.body, message.contentType
+	for _, r := range ss.recipients {
+		if r.mailboxID != "" {
+			local = append(local, r)
+			continue
+		}
+		address := r.address
+		switch classifyRecipient(address, message.to, message.cc) {
+		case "cc":
+			external.Cc = append(external.Cc, address)
+		case "bcc":
+			external.Bcc = append(external.Bcc, address)
+		default:
+			external.To = append(external.To, address)
+		}
+	}
+	if len(local) > 0 {
+		if err := deliverJob(context.Background(), ss.server.service, newDeliveryJob(message, raw, ss.from, local)); err != nil {
+			return err
+		}
+	}
+	if len(external.To)+len(external.Cc)+len(external.Bcc) == 0 {
+		return nil
+	}
+	if err := ss.server.service.SendOutbound(context.Background(), external); err != nil {
+		return submissionError(err)
+	}
+	return nil
+}
+
+// classifyRecipient assigns an envelope recipient to the header section it
+// appears in. Envelope recipients that are absent from both To and Cc headers
+// are Bcc recipients.
+func classifyRecipient(address string, to, cc []service.RecipientInput) string {
+	address = strings.ToLower(strings.TrimSpace(address))
+	for _, r := range to {
+		if strings.ToLower(strings.TrimSpace(r.Address)) == address {
+			return "to"
+		}
+	}
+	for _, r := range cc {
+		if strings.ToLower(strings.TrimSpace(r.Address)) == address {
+			return "cc"
+		}
+	}
+	return "bcc"
+}
+
+func submissionError(err error) error {
+	switch {
+	case errors.Is(err, service.ErrOutboundRelayUnavailable):
+		return &gosmtp.SMTPError{Code: 554, EnhancedCode: gosmtp.EnhancedCode{5, 3, 0}, Message: "Outbound relay is not configured"}
+	case errors.Is(err, service.ErrSendLimitExceeded):
+		return &gosmtp.SMTPError{Code: 452, EnhancedCode: gosmtp.EnhancedCode{4, 3, 2}, Message: "Outbound send limit exceeded"}
+	case errors.Is(err, relay.ErrAttachmentSourceRequired):
+		return &gosmtp.SMTPError{Code: 554, EnhancedCode: gosmtp.EnhancedCode{5, 6, 0}, Message: "Message attachments are not supported"}
+	default:
+		return &gosmtp.SMTPError{Code: 554, EnhancedCode: gosmtp.EnhancedCode{5, 3, 0}, Message: "Message delivery failed"}
+	}
 }
 func (s *Server) requiresAuthentication() bool {
 	return s.cfg.RequireAuth || strings.TrimSpace(s.cfg.Port) == "587"

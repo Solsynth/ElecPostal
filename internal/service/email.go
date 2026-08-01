@@ -30,6 +30,7 @@ var (
 	ErrMailboxLimitExceeded      = errors.New("workspace mailbox limit exceeded")
 	ErrCustomDomainLimitExceeded = errors.New("workspace custom domain limit exceeded")
 	ErrSendLimitExceeded         = errors.New("outbound email send limit exceeded")
+	ErrOutboundRelayUnavailable  = errors.New("outbound relay is not configured")
 )
 
 var reservedMailboxLocalParts = map[string]struct{}{
@@ -1646,6 +1647,21 @@ func localRecipientInputs(addresses []string, kind string) []RecipientInput {
 		result = append(result, RecipientInput{Address: address, Kind: kind})
 	}
 	return result
+}
+
+// SendOutbound relays the external leg of an SMTP submission through the
+// configured provider. Local recipients are delivered directly by the SMTP
+// session, so the message passed here only contains recipients that are not
+// served by this instance. The submitting client owns its Sent-folder copy via
+// IMAP APPEND and no Sent record is created here.
+func (s *EmailService) SendOutbound(ctx context.Context, message relay.Message) error {
+	if s.relay == nil {
+		return ErrOutboundRelayUnavailable
+	}
+	if _, err := s.relay.Send(ctx, message); err != nil {
+		return err
+	}
+	return nil
 }
 
 // ReceiveEmail stores a message received from another mail service. Raw

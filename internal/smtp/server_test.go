@@ -22,6 +22,7 @@ import (
 
 	"src.solsynth.dev/sosys/elecpostal/internal/config"
 	"src.solsynth.dev/sosys/elecpostal/internal/database"
+	"src.solsynth.dev/sosys/elecpostal/internal/relay"
 	"src.solsynth.dev/sosys/elecpostal/internal/service"
 )
 
@@ -30,6 +31,7 @@ type fakeBackend struct {
 	defaultBox *database.Mailbox
 	authOK     bool
 	inputs     []service.ReceiveEmailInput
+	outbound   []relay.Message
 	mu         sync.Mutex
 }
 
@@ -44,7 +46,7 @@ func (f *fakeBackend) ResolveLocalMailbox(_ context.Context, address string) (*d
 }
 func (f *fakeBackend) AuthenticateMailProtocolAddress(_ context.Context, address, secret, protocol string) (*service.ProtocolPrincipal, error) {
 	if f.authOK && address == "alice@example.test" && secret == "secret" && protocol == "smtp" {
-		return &service.ProtocolPrincipal{AccountID: uuid.New()}, nil
+		return &service.ProtocolPrincipal{AccountID: uuid.New(), MailboxID: "alice-box"}, nil
 	}
 	return nil, service.ErrForbidden
 }
@@ -53,6 +55,13 @@ func (f *fakeBackend) ReceiveEmail(_ context.Context, input service.ReceiveEmail
 	defer f.mu.Unlock()
 	f.inputs = append(f.inputs, input)
 	return &database.Email{ID: "received"}, nil
+}
+
+func (f *fakeBackend) SendOutbound(_ context.Context, message relay.Message) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.outbound = append(f.outbound, message)
+	return nil
 }
 
 func newSession(t *testing.T, backend *fakeBackend, port string) (*bufio.Reader, *bufio.Writer, net.Conn) {
@@ -220,6 +229,57 @@ func TestSMTPSubmissionRequiresAuthentication(t *testing.T) {
 	}
 	if got := command(t, r, w, "MAIL FROM:<sender@remote.test>"); !strings.HasPrefix(got, "250") {
 		t.Fatal(got)
+	}
+}
+
+func TestSMTPSubmissionRelaysExternalRecipients(t *testing.T) {
+	backend := &fakeBackend{
+		authOK: true,
+		mailboxes: map[string]*database.Mailbox{
+			"alice@example.test": {ID: "alice"},
+			"bob@example.test":   {ID: "bob"},
+		},
+	}
+	r, w, conn := newSession(t, backend, "587")
+	defer conn.Close()
+	_ = command(t, r, w, "EHLO test")
+	encoded := "AGFsaWNlQGV4YW1wbGUudGVzdABzZWNyZXQ="
+	if got := command(t, r, w, "AUTH PLAIN "+encoded); !strings.HasPrefix(got, "235") {
+		t.Fatal(got)
+	}
+	if got := command(t, r, w, "MAIL FROM:<alice@example.test>"); !strings.HasPrefix(got, "250") {
+		t.Fatal(got)
+	}
+	if got := command(t, r, w, "RCPT TO:<bob@example.test>"); !strings.HasPrefix(got, "250") {
+		t.Fatal(got)
+	}
+	if got := command(t, r, w, "RCPT TO:<friend@external.test>"); !strings.HasPrefix(got, "250") {
+		t.Fatalf("external recipient rejected: %q", got)
+	}
+	if got := command(t, r, w, "RCPT TO:<cc@external.test>"); !strings.HasPrefix(got, "250") {
+		t.Fatalf("external cc rejected: %q", got)
+	}
+	if got := command(t, r, w, "RCPT TO:<hidden@external.test>"); !strings.HasPrefix(got, "250") {
+		t.Fatalf("external bcc rejected: %q", got)
+	}
+	if got := data(t, r, w, "From: Alice <alice@example.test>\r\nTo: bob@example.test, friend@external.test\r\nCc: cc@external.test\r\nSubject: Submission\r\n\r\nbody"); !strings.HasPrefix(got, "250") {
+		t.Fatal(got)
+	}
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if len(backend.inputs) != 1 || backend.inputs[0].MailboxID != "bob" {
+		t.Fatalf("local delivery: %#v", backend.inputs)
+	}
+	if len(backend.outbound) != 1 {
+		t.Fatalf("outbound: %#v", backend.outbound)
+	}
+	outbound := backend.outbound[0]
+	if outbound.FromAddress != "alice@example.test" || outbound.Subject != "Submission" {
+		t.Fatalf("outbound envelope: %#v", outbound)
+	}
+	gotTo, gotCc, gotBcc := strings.Join(outbound.To, ","), strings.Join(outbound.Cc, ","), strings.Join(outbound.Bcc, ",")
+	if gotTo != "friend@external.test" || gotCc != "cc@external.test" || gotBcc != "hidden@external.test" {
+		t.Fatalf("outbound recipients: to=%q cc=%q bcc=%q", gotTo, gotCc, gotBcc)
 	}
 }
 
