@@ -39,6 +39,7 @@ type DeliveryQueue interface {
 }
 type Backend interface {
 	ResolveLocalMailbox(context.Context, string) (*database.Mailbox, error)
+	IsMailboxSender(context.Context, string, string) (bool, error)
 	AuthenticateMailProtocolAddress(context.Context, string, string, string) (*service.ProtocolPrincipal, error)
 	ReceiveEmail(context.Context, service.ReceiveEmailInput) (*database.Email, error)
 	SendOutbound(context.Context, relay.Message) error
@@ -175,8 +176,14 @@ func (ss *smtpSession) Mail(from string, _ *gosmtp.MailOptions) error {
 	if ss.server.requiresAuthentication() && !ss.authenticated {
 		return &gosmtp.SMTPError{Code: 530, EnhancedCode: gosmtp.EnhancedCode{5, 7, 0}, Message: "Authentication required"}
 	}
-	if ss.principal != nil && ss.principal.Address != "" && from != "" && !strings.EqualFold(from, ss.principal.Address) {
-		return &gosmtp.SMTPError{Code: 553, EnhancedCode: gosmtp.EnhancedCode{5, 7, 1}, Message: "Sender address does not match authenticated mailbox"}
+	if ss.principal != nil && ss.principal.MailboxID != "" && from != "" {
+		allowed, err := ss.server.service.IsMailboxSender(context.Background(), ss.principal.MailboxID, from)
+		if err != nil {
+			return &gosmtp.SMTPError{Code: 451, EnhancedCode: gosmtp.EnhancedCode{4, 3, 0}, Message: "Temporary sender lookup failure"}
+		}
+		if !allowed {
+			return &gosmtp.SMTPError{Code: 553, EnhancedCode: gosmtp.EnhancedCode{5, 7, 1}, Message: "Sender address does not match authenticated mailbox"}
+		}
 	}
 	ss.from, ss.recipients = strings.ToLower(from), nil
 	return nil

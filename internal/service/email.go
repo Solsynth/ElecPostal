@@ -338,6 +338,27 @@ func (s *EmailService) ResolveLocalMailbox(ctx context.Context, address string) 
 	return &mailbox, nil
 }
 
+// IsMailboxSender reports whether address is the primary address or an alias
+// assigned to mailboxID. SMTP submission uses it to prevent mailbox spoofing.
+func (s *EmailService) IsMailboxSender(ctx context.Context, mailboxID, address string) (bool, error) {
+	address = strings.ToLower(strings.TrimSpace(address))
+	var mailbox database.Mailbox
+	if err := s.db.WithContext(ctx).Where("id = ?", mailboxID).First(&mailbox).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	if address == s.normalizeFromAddress(mailbox.Address) {
+		return true, nil
+	}
+	var count int64
+	if err := s.db.WithContext(ctx).Model(&database.MailboxAlias{}).Where("mailbox_id = ? AND LOWER(address) = ?", mailboxID, address).Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 // mailboxLoginCandidates supports legacy mailbox rows containing only a
 // local-part while retaining the canonical full-address form for new rows.
 func (s *EmailService) mailboxLoginCandidates(address string) []string {

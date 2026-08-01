@@ -27,12 +27,13 @@ import (
 )
 
 type fakeBackend struct {
-	mailboxes  map[string]*database.Mailbox
-	defaultBox *database.Mailbox
-	authOK     bool
-	inputs     []service.ReceiveEmailInput
-	outbound   []relay.Message
-	mu         sync.Mutex
+	mailboxes      map[string]*database.Mailbox
+	mailboxSenders map[string]map[string]bool
+	defaultBox     *database.Mailbox
+	authOK         bool
+	inputs         []service.ReceiveEmailInput
+	outbound       []relay.Message
+	mu             sync.Mutex
 }
 
 func (f *fakeBackend) ResolveLocalMailbox(_ context.Context, address string) (*database.Mailbox, error) {
@@ -43,6 +44,10 @@ func (f *fakeBackend) ResolveLocalMailbox(_ context.Context, address string) (*d
 		return box, nil
 	}
 	return nil, service.ErrNotFound
+}
+
+func (f *fakeBackend) IsMailboxSender(_ context.Context, mailboxID, address string) (bool, error) {
+	return f.mailboxSenders[mailboxID][strings.ToLower(address)], nil
 }
 func (f *fakeBackend) AuthenticateMailProtocolAddress(_ context.Context, address, secret, protocol string) (*service.ProtocolPrincipal, error) {
 	if f.authOK && address == "alice@example.test" && secret == "secret" && protocol == "smtp" {
@@ -216,7 +221,7 @@ func TestParseMessagePreservesInlineImageReference(t *testing.T) {
 
 func TestSMTPSubmissionRequiresAuthentication(t *testing.T) {
 	box := &database.Mailbox{ID: "alice"}
-	backend := &fakeBackend{authOK: true, mailboxes: map[string]*database.Mailbox{"alice@example.test": box}}
+	backend := &fakeBackend{authOK: true, mailboxSenders: map[string]map[string]bool{"alice-box": {"alice@example.test": true}}, mailboxes: map[string]*database.Mailbox{"alice@example.test": box}}
 	r, w, conn := newSession(t, backend, "587")
 	defer conn.Close()
 	_ = command(t, r, w, "EHLO test")
@@ -227,19 +232,30 @@ func TestSMTPSubmissionRequiresAuthentication(t *testing.T) {
 	if got := command(t, r, w, "AUTH PLAIN "+encoded); !strings.HasPrefix(got, "235") {
 		t.Fatal(got)
 	}
-	if got := command(t, r, w, "MAIL FROM:<sender@remote.test>"); !strings.HasPrefix(got, "250") {
+	if got := command(t, r, w, "MAIL FROM:<alice@example.test>"); !strings.HasPrefix(got, "250") {
 		t.Fatal(got)
 	}
 }
 
-func TestSMTPSubmissionRelaysExternalRecipients(t *testing.T) {
-	backend := &fakeBackend{
-		authOK: true,
-		mailboxes: map[string]*database.Mailbox{
-			"alice@example.test": {ID: "alice"},
-			"bob@example.test":   {ID: "bob"},
-		},
+func TestSMTPSubmissionAcceptsAuthenticatedMailboxAlias(t *testing.T) {
+	backend := &fakeBackend{authOK: true, mailboxSenders: map[string]map[string]bool{"alice-box": {"hi@littlesheep.me": true}}, mailboxes: map[string]*database.Mailbox{}}
+	r, w, conn := newSession(t, backend, "587")
+	defer conn.Close()
+	_ = command(t, r, w, "EHLO test")
+	encoded := "AGFsaWNlQGV4YW1wbGUudGVzdABzZWNyZXQ="
+	if got := command(t, r, w, "AUTH PLAIN "+encoded); !strings.HasPrefix(got, "235") {
+		t.Fatal(got)
 	}
+	if got := command(t, r, w, "MAIL FROM:<hi@littlesheep.me>"); !strings.HasPrefix(got, "250") {
+		t.Fatalf("alias sender rejected: %q", got)
+	}
+	if got := command(t, r, w, "MAIL FROM:<other@littlesheep.me>"); got != "553 5.7.1 Sender address does not match authenticated mailbox" {
+		t.Fatalf("unowned sender accepted: %q", got)
+	}
+}
+
+func TestSMTPSubmissionRelaysExternalRecipients(t *testing.T) {
+	backend := &fakeBackend{authOK: true, mailboxSenders: map[string]map[string]bool{"alice-box": {"alice@example.test": true}}, mailboxes: map[string]*database.Mailbox{"alice@example.test": {ID: "alice"}, "bob@example.test": {ID: "bob"}}}
 	r, w, conn := newSession(t, backend, "587")
 	defer conn.Close()
 	_ = command(t, r, w, "EHLO test")
