@@ -241,6 +241,9 @@ type EmailService struct {
 	workspace  workspace.Provider
 	identities relay.IdentityManager
 	domain     string
+	inbound    string
+	dns        relay.DNSChecker
+	dnsLabel   string
 }
 
 // SetRelay configures outbound delivery. A nil adapter retains the existing
@@ -262,6 +265,28 @@ func (s *EmailService) SetRealtimePublisher(publisher realtime.Publisher) { s.re
 // mailbox addresses (e.g. "alice" -> "alice@example.com") for outbound relay.
 func (s *EmailService) SetDomain(domain string) {
 	s.domain = strings.TrimSpace(strings.ToLower(domain))
+}
+
+// SetInboundHost configures the public MX hostname that receives mail for
+// local domains. Custom domains advertise it as their inbound MX record.
+func (s *EmailService) SetInboundHost(host string) {
+	s.inbound = strings.TrimSpace(strings.ToLower(host))
+}
+
+// SetDNSResolver configures the DNS server used to validate custom-domain
+// DKIM, SPF, and inbound MX records. An empty host falls back to 1.1.1.1.
+func (s *EmailService) SetDNSResolver(host string) error {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		host = "1.1.1.1"
+	}
+	resolver, err := relay.NewDNSResolver(host)
+	if err != nil {
+		return err
+	}
+	s.dns = resolver
+	s.dnsLabel = host
+	return nil
 }
 
 // NewEmailService creates a new EmailService.
@@ -450,7 +475,7 @@ func (s *EmailService) CreateCustomDomain(ctx context.Context, accountID uuid.UU
 		return nil, fmt.Errorf("SES custom domain already exists; contact an administrator to associate it")
 	}
 	customDomain := database.CustomDomain{WorkspaceID: strings.TrimSpace(input.WorkspaceID), Provider: "ses", Domain: domain}
-	applyCustomDomainStatus(&customDomain, status)
+	s.applyCustomDomainStatusWithDNS(ctx, &customDomain, status)
 	if err := s.db.WithContext(ctx).Create(&customDomain).Error; err != nil {
 		return nil, err
 	}
@@ -540,22 +565,49 @@ func (s *EmailService) refreshCustomDomain(ctx context.Context, domain *database
 			return nil, err
 		}
 	}
-	applyCustomDomainStatus(domain, status)
+	s.applyCustomDomainStatusWithDNS(ctx, domain, status)
 	if err := s.db.WithContext(ctx).Save(domain).Error; err != nil {
 		return nil, err
 	}
 	return domain, nil
 }
 
-func applyCustomDomainStatus(domain *database.CustomDomain, status relay.IdentityStatus) {
+// customDomainDNSRecords returns the records a customer must publish: the
+// provider records plus the inbound MX record for receiving mail.
+func customDomainDNSRecords(status relay.IdentityStatus, inboundHost string) []relay.DNSRecord {
+	records := status.DNSRecords
+	if inboundHost != "" && status.IdentityType == "DOMAIN" {
+		records = append(records, relay.DNSRecord{Name: status.Identity, Type: "MX", Value: "10 " + inboundHost})
+	}
+	return records
+}
+
+// applyCustomDomainStatusWithDNS persists provider status, validates the
+// published records through the configured DNS resolver, and derives the setup
+// stage.
+func (s *EmailService) applyCustomDomainStatusWithDNS(ctx context.Context, domain *database.CustomDomain, status relay.IdentityStatus) {
+	records := customDomainDNSRecords(status, s.inbound)
+	applyCustomDomainStatus(domain, status, records)
+	if s.dns == nil {
+		domain.Stage = relay.CustomDomainStageBasic
+		domain.DNSValidation = nil
+		return
+	}
+	validation := relay.ValidateCustomDomainDNS(ctx, s.dns, domain.Domain, records, s.inbound, s.dnsLabel)
+	domain.Stage = relay.StageReport(validation)
+	encoded, _ := json.Marshal(validation)
+	domain.DNSValidation = datatypes.JSON(encoded)
+}
+
+func applyCustomDomainStatus(domain *database.CustomDomain, status relay.IdentityStatus, records []relay.DNSRecord) {
 	domain.DomainType = status.IdentityType
 	domain.VerificationStatus = status.VerificationStatus
 	domain.VerifiedForSendingStatus = status.VerifiedForSendingStatus
 	domain.DKIMStatus = status.DKIMStatus
 	domain.MailFromDomain = status.MailFromDomain
 	domain.MailFromStatus = status.MailFromStatus
-	records, _ := json.Marshal(status.DNSRecords)
-	domain.DNSRecords = datatypes.JSON(records)
+	encoded, _ := json.Marshal(records)
+	domain.DNSRecords = datatypes.JSON(encoded)
 }
 
 func normalizeCustomDomain(value string) (string, error) {

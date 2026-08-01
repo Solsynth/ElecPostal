@@ -39,6 +39,8 @@ type CustomDomain struct {
 	DKIMStatus               string         `gorm:"size:32" json:"dkim_status"`
 	MailFromDomain           string         `gorm:"size:255" json:"mail_from_domain"`
 	MailFromStatus           string         `gorm:"size:32" json:"mail_from_status"`
+	Stage                    string         `gorm:"size:16" json:"stage"` // basic, full, or completed
+	DNSValidation            datatypes.JSON `gorm:"type:jsonb" json:"dns_validation,omitempty"`
 	DNSRecords               datatypes.JSON `gorm:"type:jsonb" json:"dns_records"`
 	CreatedAt                time.Time      `json:"created_at"`
 	UpdatedAt                time.Time      `json:"updated_at"`

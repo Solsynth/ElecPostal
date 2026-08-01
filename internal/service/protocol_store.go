@@ -4,8 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime"
+	"mime/multipart"
+	"mime/quotedprintable"
 	"net/mail"
 	"sort"
 	"strings"
@@ -223,6 +228,229 @@ func (s *EmailService) StoreProtocolFlags(ctx context.Context, mailboxID, folder
 		return tx.Save(&folder).Error
 	})
 	return result, err
+}
+
+// AppendProtocolMessage stores a client-supplied RFC 5322 message directly
+// into a protocol folder, backing the IMAP APPEND command. The raw source is
+// preserved verbatim for IMAP/POP3 retrieval while parsed headers feed the HTTP
+// index. It returns the assigned UID and mod-sequence.
+func (s *EmailService) AppendProtocolMessage(ctx context.Context, mailboxID, folderName string, raw []byte, flags []string, date time.Time) (uint32, uint64, error) {
+	if strings.TrimSpace(mailboxID) == "" {
+		return 0, 0, fmt.Errorf("mailbox_id is required")
+	}
+	folderName = strings.TrimSpace(folderName)
+	if folderName == "" {
+		return 0, 0, fmt.Errorf("folder name is required")
+	}
+	if len(raw) == 0 {
+		return 0, 0, fmt.Errorf("message source is required")
+	}
+	var mailbox database.Mailbox
+	if err := s.db.WithContext(ctx).Where("id = ?", mailboxID).First(&mailbox).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return 0, 0, ErrNotFound
+		}
+		return 0, 0, err
+	}
+	if date.IsZero() {
+		date = time.Now()
+	}
+
+	parsed := parseAppendedSource(raw)
+	threadID := database.NewID()
+	httpFolder := httpFolderName(folderName)
+	email := database.Email{
+		AccountID:      mailbox.AccountID,
+		MailboxID:      mailbox.ID,
+		ThreadID:       &threadID,
+		Subject:        parsed.subject,
+		Body:           parsed.body,
+		FromAddress:    parsed.fromAddress,
+		FromName:       parsed.fromName,
+		Folder:         httpFolder,
+		ContentType:    parsed.contentType,
+		IsDraft:        httpFolder == folderDrafts || hasSystemFlag(flags, `\Draft`),
+		IsRead:         hasSystemFlag(flags, `\Seen`),
+		SentAt:         &date,
+		RawSizeBytes:   int64(len(raw)),
+		DeliveryStatus: "draft",
+	}
+	if httpFolder != folderDrafts {
+		email.DeliveryStatus = ""
+	}
+
+	var uid uint32
+	var modSeq uint64
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&email).Error; err != nil {
+			return err
+		}
+		for _, recipient := range parsed.to {
+			if err := tx.Create(&database.Recipient{EmailID: email.ID, Address: recipient.Address, Name: recipient.Name, Kind: normalizeKind(recipient.Kind, "to")}).Error; err != nil {
+				return err
+			}
+		}
+		for _, recipient := range parsed.cc {
+			if err := tx.Create(&database.Recipient{EmailID: email.ID, Address: recipient.Address, Name: recipient.Name, Kind: normalizeKind(recipient.Kind, "cc")}).Error; err != nil {
+				return err
+			}
+		}
+		if err := s.storeProtocolSourceTx(tx, &email, raw, ""); err != nil {
+			return err
+		}
+		uid, modSeq, err = s.appendFolderMembershipTx(tx, mailbox.ID, folderName, email.ID, flags, date)
+		return err
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	s.publishMailEvent(ctx, email.AccountID.String(), "mail.created", &email)
+	return uid, modSeq, nil
+}
+
+// appendFolderMembershipTx allocates the next UID and mod-sequence and links an
+// existing message into a folder with the flags supplied by APPEND.
+func (s *EmailService) appendFolderMembershipTx(tx *gorm.DB, mailboxID, name, emailID string, flags []string, date time.Time) (uint32, uint64, error) {
+	if err := s.ensureProtocolFoldersTx(tx, mailboxID); err != nil {
+		return 0, 0, err
+	}
+	var folder database.MailFolder
+	if err := tx.Clauses(clauseLock()).Where("mailbox_id = ? AND name = ?", mailboxID, name).First(&folder).Error; err != nil {
+		return 0, 0, err
+	}
+	uid, modSeq := folder.NextUID, folder.HighestModSeq+1
+	row := database.FolderMessage{FolderID: folder.ID, EmailID: emailID, UID: uid, Flags: datatypes.JSON(marshalFlags(mergeFlags(nil, flags, "add"))), ModSeq: modSeq, CreatedAt: date}
+	if err := tx.Create(&row).Error; err != nil {
+		return 0, 0, err
+	}
+	if err := tx.Model(&database.MailFolder{}).Where("id = ?", folder.ID).Updates(map[string]any{"next_uid": uid + 1, "highest_mod_seq": modSeq}).Error; err != nil {
+		return 0, 0, err
+	}
+	return uid, modSeq, nil
+}
+
+// httpFolderName maps an IMAP folder name back to the HTTP mailbox folder.
+func httpFolderName(folder string) string {
+	switch strings.ToLower(strings.TrimSpace(folder)) {
+	case "sent":
+		return folderSent
+	case "drafts":
+		return folderDrafts
+	case "spam":
+		return folderSpam
+	case "trash":
+		return folderTrash
+	case "archive":
+		return folderArchive
+	default:
+		return folderInbox
+	}
+}
+
+func hasSystemFlag(flags []string, flag string) bool {
+	for _, value := range flags {
+		if strings.EqualFold(value, flag) {
+			return true
+		}
+	}
+	return false
+}
+
+// parseAppendedSource extracts the HTTP index fields from a client-supplied
+// raw message. Only the first text/plain and text/html parts are indexed;
+// attachments stay in the verbatim source and are not duplicated into storage.
+func parseAppendedSource(raw []byte) appendedSource {
+	result := appendedSource{contentType: "text/plain"}
+	message, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		return result
+	}
+	if from, err := message.Header.AddressList("From"); err == nil && len(from) > 0 {
+		result.fromAddress, result.fromName = strings.ToLower(from[0].Address), from[0].Name
+	}
+	result.subject = decodeHeader(message.Header.Get("Subject"))
+	result.to = recipientInputs(message.Header, "To")
+	result.cc = recipientInputs(message.Header, "Cc")
+	plain, html := extractBodyParts(message.Header, message.Body)
+	if html != "" {
+		result.body, result.contentType = html, "text/html"
+	} else {
+		result.body = plain
+	}
+	return result
+}
+
+type appendedSource struct {
+	subject, fromAddress, fromName, body, contentType string
+	to, cc                                            []RecipientInput
+}
+
+func recipientInputs(header mail.Header, key string) []RecipientInput {
+	list, err := header.AddressList(key)
+	if err != nil {
+		return nil
+	}
+	result := make([]RecipientInput, 0, len(list))
+	for _, address := range list {
+		result = append(result, RecipientInput{Address: strings.ToLower(address.Address), Name: address.Name, Kind: strings.ToLower(key)})
+	}
+	return result
+}
+
+func decodeHeader(value string) string {
+	decoded, err := new(mime.WordDecoder).DecodeHeader(value)
+	if err != nil {
+		return value
+	}
+	return decoded
+}
+
+func extractBodyParts(header mail.Header, body io.Reader) (plain, html string) {
+	mediaType, params, err := mime.ParseMediaType(header.Get("Content-Type"))
+	if err != nil {
+		mediaType = "text/plain"
+	}
+	disposition, _, _ := mime.ParseMediaType(header.Get("Content-Disposition"))
+	if strings.HasPrefix(strings.ToLower(mediaType), "multipart/") {
+		reader := multipart.NewReader(body, params["boundary"])
+		for {
+			part, err := reader.NextPart()
+			if err != nil {
+				break
+			}
+			partPlain, partHTML := extractBodyParts(mail.Header(part.Header), part)
+			_ = part.Close()
+			if plain == "" {
+				plain = partPlain
+			}
+			if html == "" {
+				html = partHTML
+			}
+		}
+		return plain, html
+	}
+	if strings.EqualFold(disposition, "attachment") || strings.EqualFold(disposition, "inline") {
+		return "", ""
+	}
+	data, err := io.ReadAll(decodeTransfer(header.Get("Content-Transfer-Encoding"), body))
+	if err != nil {
+		return "", ""
+	}
+	if strings.EqualFold(mediaType, "text/html") {
+		return "", string(data)
+	}
+	return string(data), ""
+}
+
+func decodeTransfer(encoding string, body io.Reader) io.Reader {
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
+	case "base64":
+		return base64.NewDecoder(base64.StdEncoding, body)
+	case "quoted-printable":
+		return quotedprintable.NewReader(body)
+	default:
+		return body
+	}
 }
 
 func mergeFlags(current, requested []string, mode string) []string {

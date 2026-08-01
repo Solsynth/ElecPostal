@@ -76,6 +76,10 @@ func New(cfg *config.Config) (*App, error) {
 		emailSvc.SetRealtimePublisher(publisher)
 	}
 	emailSvc.SetDomain(cfg.Mail.Domain)
+	emailSvc.SetInboundHost(cfg.Mail.Relay.InboundHost)
+	if err := emailSvc.SetDNSResolver(cfg.Mail.Relay.DNSResolver); err != nil {
+		return nil, fmt.Errorf("configure DNS resolver: %w", err)
+	}
 	switch cfg.Mail.Relay.Adapter {
 	case "direct-smtp":
 		directRelay, err := relay.NewDirectSMTPAdapter(relay.DirectSMTPConfig{

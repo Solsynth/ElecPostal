@@ -157,6 +157,8 @@ the custom domain:
 - An MX record and an SPF TXT record for a custom `bounce.example.com`
   MAIL FROM subdomain, so SES uses your domain in the return-path instead of
   `amazonses.com`.
+- An inbound MX record pointing at `mail.relay.inboundHost`, required only to
+  receive mail on the domain.
 
 Publish all of them. Custom domains use SES Easy DKIM verification and SES
 provisioning for the custom MAIL FROM domain.
@@ -171,20 +173,41 @@ provisioning for the custom MAIL FROM domain.
   "dkim_status": "PENDING",
   "mail_from_domain": "bounce.example.com",
   "mail_from_status": "PENDING",
+  "stage": "basic",
   "dns_records": [
     {"name":"token._domainkey.example.com","type":"CNAME","value":"token.dkim.amazonses.com"},
     {"name":"bounce.example.com","type":"MX","value":"10 feedback-smtp.us-east-1.amazonses.com"},
-    {"name":"bounce.example.com","type":"TXT","value":"v=spf1 include:amazonses.com ~all"}
+    {"name":"bounce.example.com","type":"TXT","value":"v=spf1 include:amazonses.com ~all"},
+    {"name":"example.com","type":"MX","value":"10 mail.example.com"}
   ]
 }
 ```
 
+### Setup stages
+
+The `stage` field tracks how far the domain's live DNS has progressed. On
+every create or refresh, ElecPostal resolves the published records through the
+configured DNS server (`mail.relay.dnsResolver`, default `1.1.1.1`) and
+derives the stage:
+
+| Stage | Meaning | DNS required |
+| --- | --- | --- |
+| `basic` | Domain connected; SES can verify it once the DKIM records appear. This is the minimum requirement to send. | — |
+| `full` | Sending fully configured. | Easy DKIM CNAMEs resolve and the MAIL FROM SPF TXT record exists. |
+| `completed` | Receive flow also configured. | Everything in `full`, plus the domain's MX points at `mail.relay.inboundHost`. |
+
+`dns_validation` contains the per-record check result (`resolver`, one entry
+per record with `ok` and a `detail` on failure, plus `dkim`/`spf`/`mx`
+booleans). While `stage` is below `completed`, publish the missing records and
+refresh again.
+
 `GET /api/custom-domains?workspace_id={workspace-id}` lists domains.
 `POST /api/custom-domains/{id}/refresh` fetches the latest SES verification,
-Easy DKIM, and MAIL FROM status. `DELETE /api/custom-domains/{id}` removes the
-custom domain from SES after all of its aliases are removed. Non-draft
-custom-domain sends require a verified custom domain in the mailbox's
-workspace. The configured canonical `mail.domain` remains operator-managed.
+Easy DKIM, and MAIL FROM status and re-runs the DNS validation.
+`DELETE /api/custom-domains/{id}` removes the custom domain from SES after all
+of its aliases are removed. Non-draft custom-domain sends require a verified
+custom domain in the mailbox's workspace. The configured canonical
+`mail.domain` remains operator-managed.
 
 ### Mailbox aliases
 

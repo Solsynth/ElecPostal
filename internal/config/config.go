@@ -115,7 +115,8 @@ type RelayConfig struct {
 	Password      string `mapstructure:"password"`
 	Region        string `mapstructure:"region"`
 	InboundHost   string `mapstructure:"inboundHost"`
-	TLSMode       string `mapstructure:"tlsMode"` // starttls, implicit, disabled
+	DNSResolver   string `mapstructure:"dnsResolver"` // DNS server used to validate custom-domain records, default 1.1.1.1
+	TLSMode       string `mapstructure:"tlsMode"`     // starttls, implicit, disabled
 	TLSHost       string `mapstructure:"tlsHost"`
 	TLSSkipVerify bool   `mapstructure:"tlsSkipVerify"`
 }
@@ -194,6 +195,7 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("mail.relay.adapter", "")
 	v.SetDefault("mail.relay.port", "587")
 	v.SetDefault("mail.relay.tlsMode", "starttls")
+	v.SetDefault("mail.relay.dnsResolver", "1.1.1.1")
 	v.SetDefault("ring.target", "")
 	v.SetDefault("ring.useTLS", false)
 	v.SetDefault("ring.tlsSkipVerify", false)

@@ -64,6 +64,7 @@ username = ""               # reserved for SMTP-based adapters
 password = ""               # reserved for SMTP-based adapters
 region = "ap-northeast-1"   # required by adapter = "ses"; AWS SDK credentials use its default provider chain
 inboundHost = "mail.example.com" # matching recipient MX records are delivered locally before the outbound adapter
+dnsResolver = "1.1.1.1"     # DNS server used to validate custom-domain DKIM, SPF, and inbound MX records
 tlsMode = "starttls"       # direct-smtp: starttls or required; listener modes: starttls, implicit, disabled
 tlsHost = ""               # optional TLS server-name override
 tlsSkipVerify = false
