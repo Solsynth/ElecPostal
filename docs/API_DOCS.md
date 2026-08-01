@@ -69,6 +69,52 @@ Creating a mailbox requires the authenticated account to be an active member of
 the selected workspace. Workspace plans allow 1 mailbox on Free, 3 on Pro, and
 10 on Enterprise.
 
+### Workspace mailbox usage
+
+`GET /api/workspaces/{workspace-id}/mailbox-usage`
+
+Returns how many mailboxes the workspace has created against its plan limit. The
+caller must be an active member of the workspace.
+
+```json
+{
+  "workspace_id": "01J...",
+  "used": 2,
+  "limit": 3,
+  "remaining": 1
+}
+```
+
+Exceeding `limit` makes mailbox creation fail with the
+`workspace mailbox limit exceeded` error.
+
+### Workspace send usage
+
+`GET /api/workspaces/{workspace-id}/send-usage`
+
+Returns the workspace-scoped outbound send limits for the current day and
+calendar month and how many messages were sent in each period. A `limit` of `0`
+means that counter is disabled. Mailbox-scoped limits are not included.
+
+```json
+{
+  "workspace_id": "01J...",
+  "daily": {
+    "limit": 100,
+    "used": 12,
+    "remaining": 88
+  },
+  "monthly": {
+    "limit": 2000,
+    "used": 305,
+    "remaining": 1695
+  }
+}
+```
+
+When a limit is exhausted, sending returns `429 Too Many Requests` until the
+next day or month begins.
+
 ## Custom domains
 
 When the server is configured with `mail.relay.adapter = "ses"`, workspace

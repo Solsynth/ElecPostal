@@ -84,6 +84,12 @@ func RegisterRoutes(r *gin.RouterGroup, emailSvc *service.EmailService) {
 		customDomains.POST("/:id/refresh", func(c *gin.Context) { refreshCustomDomain(c, emailSvc) })
 		customDomains.DELETE("/:id", func(c *gin.Context) { deleteCustomDomain(c, emailSvc) })
 	}
+
+	workspaces := r.Group("/workspaces")
+	{
+		workspaces.GET("/:id/mailbox-usage", func(c *gin.Context) { getWorkspaceMailboxUsage(c, emailSvc) })
+		workspaces.GET("/:id/send-usage", func(c *gin.Context) { getWorkspaceSendUsage(c, emailSvc) })
+	}
 }
 
 func listCustomDomains(c *gin.Context, emailSvc *service.EmailService) {
@@ -239,6 +245,32 @@ func getMailboxQuota(c *gin.Context, emailSvc *service.EmailService) {
 		return
 	}
 	c.JSON(http.StatusOK, quota)
+}
+
+func getWorkspaceMailboxUsage(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	usage, err := emailSvc.GetWorkspaceMailboxUsage(c.Request.Context(), uuid.MustParse(accountID), c.Param("id"))
+	if err != nil {
+		renderServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, usage)
+}
+
+func getWorkspaceSendUsage(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	usage, err := emailSvc.GetWorkspaceSendUsage(c.Request.Context(), uuid.MustParse(accountID), c.Param("id"))
+	if err != nil {
+		renderServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, usage)
 }
 
 func listMailboxes(c *gin.Context, emailSvc *service.EmailService) {

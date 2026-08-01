@@ -195,6 +195,32 @@ type MailboxQuota struct {
 	RemainingBytes int64  `json:"remaining_bytes"`
 }
 
+// WorkspaceMailboxUsage reports how many mailboxes a workspace has created
+// against its plan's mailbox limit.
+type WorkspaceMailboxUsage struct {
+	WorkspaceID string `json:"workspace_id"`
+	Used        int64  `json:"used"`
+	Limit       int64  `json:"limit"`
+	Remaining   int64  `json:"remaining"`
+}
+
+// SendUsage reports one calendar-period outbound send counter against its
+// limit. A zero limit means the counter is disabled.
+type SendUsage struct {
+	Limit     int64 `json:"limit"`
+	Used      int64 `json:"used"`
+	Remaining int64 `json:"remaining"`
+}
+
+// WorkspaceSendUsage reports the workspace-scoped outbound send limits for the
+// current day and month and their usage. Mailbox-scoped limits are not
+// included.
+type WorkspaceSendUsage struct {
+	WorkspaceID string    `json:"workspace_id"`
+	Daily       SendUsage `json:"daily"`
+	Monthly     SendUsage `json:"monthly"`
+}
+
 // EmailService handles email-related business logic.
 type EmailService struct {
 	db         *database.DB
@@ -1051,6 +1077,81 @@ func (s *EmailService) GetMailboxQuota(ctx context.Context, accountID uuid.UUID,
 		remaining = 0
 	}
 	return MailboxQuota{WorkspaceID: mailbox.WorkspaceID, UsedBytes: used, LimitBytes: limit, RemainingBytes: remaining}, nil
+}
+
+// GetWorkspaceMailboxUsage returns the current mailbox count and its plan
+// limit for a workspace.
+func (s *EmailService) GetWorkspaceMailboxUsage(ctx context.Context, accountID uuid.UUID, workspaceID string) (WorkspaceMailboxUsage, error) {
+	workspaceID = strings.TrimSpace(workspaceID)
+	if workspaceID == "" {
+		return WorkspaceMailboxUsage{}, fmt.Errorf("workspace_id is required")
+	}
+	if err := s.authorizeWorkspaceMember(ctx, workspaceID, accountID); err != nil {
+		return WorkspaceMailboxUsage{}, err
+	}
+	if s.workspace == nil {
+		return WorkspaceMailboxUsage{}, ErrWorkspaceUnavailable
+	}
+	limit, err := s.workspace.MailboxLimit(ctx, workspaceID)
+	if err != nil {
+		return WorkspaceMailboxUsage{}, fmt.Errorf("get workspace mailbox limit: %w", err)
+	}
+	var used int64
+	if err := s.db.WithContext(ctx).Model(&database.Mailbox{}).Where("workspace_id = ?", workspaceID).Count(&used).Error; err != nil {
+		return WorkspaceMailboxUsage{}, fmt.Errorf("count workspace mailboxes: %w", err)
+	}
+	remaining := limit - used
+	if remaining < 0 {
+		remaining = 0
+	}
+	return WorkspaceMailboxUsage{WorkspaceID: workspaceID, Used: used, Limit: limit, Remaining: remaining}, nil
+}
+
+// GetWorkspaceSendUsage returns the workspace-scoped outbound send usage for
+// the current day and calendar month.
+func (s *EmailService) GetWorkspaceSendUsage(ctx context.Context, accountID uuid.UUID, workspaceID string) (WorkspaceSendUsage, error) {
+	workspaceID = strings.TrimSpace(workspaceID)
+	if workspaceID == "" {
+		return WorkspaceSendUsage{}, fmt.Errorf("workspace_id is required")
+	}
+	if err := s.authorizeWorkspaceMember(ctx, workspaceID, accountID); err != nil {
+		return WorkspaceSendUsage{}, err
+	}
+	limits, err := s.workspaceSendLimits(ctx, workspaceID)
+	if err != nil {
+		return WorkspaceSendUsage{}, err
+	}
+	now := time.Now().UTC()
+	dayStart := now.Truncate(24 * time.Hour)
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+
+	var usages []database.MailSendUsage
+	if err := s.db.WithContext(ctx).Where(
+		"workspace_id = ? AND scope IN ? AND period_start IN ?",
+		workspaceID, []string{"workspace:day", "workspace:month"}, []time.Time{dayStart, monthStart},
+	).Find(&usages).Error; err != nil {
+		return WorkspaceSendUsage{}, fmt.Errorf("load workspace send usage: %w", err)
+	}
+
+	daily := SendUsage{Limit: limits.WorkspaceDaily}
+	monthly := SendUsage{Limit: limits.WorkspaceMonthly}
+	for _, usage := range usages {
+		switch {
+		case usage.Scope == "workspace:day" && usage.PeriodStart.Equal(dayStart):
+			daily.Used = usage.SentCount
+		case usage.Scope == "workspace:month" && usage.PeriodStart.Equal(monthStart):
+			monthly.Used = usage.SentCount
+		}
+	}
+	daily.Remaining = daily.Limit - daily.Used
+	if daily.Remaining < 0 {
+		daily.Remaining = 0
+	}
+	monthly.Remaining = monthly.Limit - monthly.Used
+	if monthly.Remaining < 0 {
+		monthly.Remaining = 0
+	}
+	return WorkspaceSendUsage{WorkspaceID: workspaceID, Daily: daily, Monthly: monthly}, nil
 }
 
 // SendEmail creates and sends an email.
