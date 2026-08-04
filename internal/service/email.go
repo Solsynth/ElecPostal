@@ -18,6 +18,7 @@ import (
 	"src.solsynth.dev/sosys/elecpostal/internal/database"
 	"src.solsynth.dev/sosys/elecpostal/internal/filesystem"
 	"src.solsynth.dev/sosys/elecpostal/internal/logging"
+	"src.solsynth.dev/sosys/elecpostal/internal/mailtext"
 	"src.solsynth.dev/sosys/elecpostal/internal/realtime"
 	"src.solsynth.dev/sosys/elecpostal/internal/relay"
 	"src.solsynth.dev/sosys/elecpostal/internal/workspace"
@@ -1692,6 +1693,22 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 	if strings.TrimSpace(input.MailboxID) == "" {
 		return nil, fmt.Errorf("mailbox_id is required")
 	}
+	// Incoming message bytes are not guaranteed to be UTF-8; PostgreSQL text
+	// columns reject invalid sequences with SQLSTATE 22021, so every string
+	// that reaches a column is normalized here regardless of producer.
+	input.Subject = mailtext.ToValidUTF8(input.Subject)
+	input.Body = mailtext.ToValidUTF8(input.Body)
+	input.FromAddress = mailtext.ToValidUTF8(input.FromAddress)
+	input.FromName = mailtext.ToValidUTF8(input.FromName)
+	input.EnvelopeFrom = mailtext.ToValidUTF8(input.EnvelopeFrom)
+	for i := range input.To {
+		input.To[i].Address = mailtext.ToValidUTF8(input.To[i].Address)
+		input.To[i].Name = mailtext.ToValidUTF8(input.To[i].Name)
+	}
+	for i := range input.Cc {
+		input.Cc[i].Address = mailtext.ToValidUTF8(input.Cc[i].Address)
+		input.Cc[i].Name = mailtext.ToValidUTF8(input.Cc[i].Name)
+	}
 	if strings.TrimSpace(input.FromAddress) == "" {
 		return nil, fmt.Errorf("from_address is required")
 	}
@@ -1718,6 +1735,9 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 			logging.Log.Warn().Err(err).Str("mailbox_id", mailbox.ID).Msg("failed to store incoming email attachment")
 			return nil, err
 		}
+		stored.Filename = mailtext.ToValidUTF8(stored.Filename)
+		stored.MimeType = mailtext.ToValidUTF8(stored.MimeType)
+		stored.ContentID = mailtext.ToValidUTF8(stored.ContentID)
 		attachments = append(attachments, stored)
 	}
 

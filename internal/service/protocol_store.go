@@ -22,6 +22,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	"src.solsynth.dev/sosys/elecpostal/internal/database"
+	"src.solsynth.dev/sosys/elecpostal/internal/mailtext"
 )
 
 var defaultProtocolFolders = []struct{ name, use string }{
@@ -264,12 +265,12 @@ func (s *EmailService) AppendProtocolMessage(ctx context.Context, mailboxID, fol
 		AccountID:      mailbox.AccountID,
 		MailboxID:      mailbox.ID,
 		ThreadID:       &threadID,
-		Subject:        parsed.subject,
-		Body:           parsed.body,
-		FromAddress:    parsed.fromAddress,
-		FromName:       parsed.fromName,
+		Subject:        mailtext.ToValidUTF8(parsed.subject),
+		Body:           mailtext.ToValidUTF8(parsed.body),
+		FromAddress:    mailtext.ToValidUTF8(parsed.fromAddress),
+		FromName:       mailtext.ToValidUTF8(parsed.fromName),
 		Folder:         httpFolder,
-		ContentType:    parsed.contentType,
+		ContentType:    mailtext.ToValidUTF8(parsed.contentType),
 		IsDraft:        httpFolder == folderDrafts || hasSystemFlag(flags, `\Draft`),
 		IsRead:         hasSystemFlag(flags, `\Seen`),
 		SentAt:         &date,
@@ -288,12 +289,12 @@ func (s *EmailService) AppendProtocolMessage(ctx context.Context, mailboxID, fol
 			return err
 		}
 		for _, recipient := range parsed.to {
-			if err := tx.Create(&database.Recipient{EmailID: email.ID, Address: recipient.Address, Name: recipient.Name, Kind: normalizeKind(recipient.Kind, "to")}).Error; err != nil {
+			if err := tx.Create(&database.Recipient{EmailID: email.ID, Address: mailtext.ToValidUTF8(recipient.Address), Name: mailtext.ToValidUTF8(recipient.Name), Kind: normalizeKind(recipient.Kind, "to")}).Error; err != nil {
 				return err
 			}
 		}
 		for _, recipient := range parsed.cc {
-			if err := tx.Create(&database.Recipient{EmailID: email.ID, Address: recipient.Address, Name: recipient.Name, Kind: normalizeKind(recipient.Kind, "cc")}).Error; err != nil {
+			if err := tx.Create(&database.Recipient{EmailID: email.ID, Address: mailtext.ToValidUTF8(recipient.Address), Name: mailtext.ToValidUTF8(recipient.Name), Kind: normalizeKind(recipient.Kind, "cc")}).Error; err != nil {
 				return err
 			}
 		}
@@ -368,9 +369,9 @@ func parseAppendedSource(raw []byte) appendedSource {
 		return result
 	}
 	if from, err := message.Header.AddressList("From"); err == nil && len(from) > 0 {
-		result.fromAddress, result.fromName = strings.ToLower(from[0].Address), from[0].Name
+		result.fromAddress, result.fromName = strings.ToLower(from[0].Address), mailtext.DecodeHeader(from[0].Name)
 	}
-	result.subject = decodeHeader(message.Header.Get("Subject"))
+	result.subject = mailtext.DecodeHeader(message.Header.Get("Subject"))
 	result.to = recipientInputs(message.Header, "To")
 	result.cc = recipientInputs(message.Header, "Cc")
 	plain, html := extractBodyParts(message.Header, message.Body)
@@ -394,17 +395,9 @@ func recipientInputs(header mail.Header, key string) []RecipientInput {
 	}
 	result := make([]RecipientInput, 0, len(list))
 	for _, address := range list {
-		result = append(result, RecipientInput{Address: strings.ToLower(address.Address), Name: address.Name, Kind: strings.ToLower(key)})
+		result = append(result, RecipientInput{Address: strings.ToLower(address.Address), Name: mailtext.DecodeHeader(address.Name), Kind: strings.ToLower(key)})
 	}
 	return result
-}
-
-func decodeHeader(value string) string {
-	decoded, err := new(mime.WordDecoder).DecodeHeader(value)
-	if err != nil {
-		return value
-	}
-	return decoded
 }
 
 func extractBodyParts(header mail.Header, body io.Reader) (plain, html string) {
@@ -439,9 +432,9 @@ func extractBodyParts(header mail.Header, body io.Reader) (plain, html string) {
 		return "", ""
 	}
 	if strings.EqualFold(mediaType, "text/html") {
-		return "", string(data)
+		return "", mailtext.DecodeBody(data, params["charset"])
 	}
-	return string(data), ""
+	return mailtext.DecodeBody(data, params["charset"]), ""
 }
 
 func decodeTransfer(encoding string, body io.Reader) io.Reader {

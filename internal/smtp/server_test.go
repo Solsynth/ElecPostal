@@ -17,6 +17,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -137,6 +138,40 @@ func TestSMTPValidLocalMailbox(t *testing.T) {
 	}
 	if len(backend.inputs) != 1 || backend.inputs[0].MailboxID != "alice" || backend.inputs[0].Body != "plain body\r\n" {
 		t.Fatalf("unexpected delivery: %#v", backend.inputs)
+	}
+}
+
+func TestSMTPDecodesLatin1Message(t *testing.T) {
+	box := &database.Mailbox{ID: "alice"}
+	backend := &fakeBackend{mailboxes: map[string]*database.Mailbox{"alice@example.test": box}}
+	r, w, conn := newSession(t, backend, "25")
+	defer conn.Close()
+	setupMail(t, r, w, "alice@example.test")
+	// Raw ISO-8859-1 bytes (0xE9 = é, 0xBB = »): persisting these verbatim
+	// fails in PostgreSQL with SQLSTATE 22021. The From name is a windows-1252
+	// encoded word, which net/mail leaves undecoded and the parser must
+	// transcode. The name is quoted: in the bare-atom form net/mail rejects
+	// the unsupported charset outright and drops the display name.
+	raw := "From: \"=?windows-1252?Q?J=F6rg?=\" <sender@remote.test>\r\n" +
+		"To: alice@example.test\r\n" +
+		"Subject: =?iso-8859-1?Q?caf=E9?=\r\n" +
+		"Content-Type: text/plain; charset=iso-8859-1\r\n" +
+		"\r\n" +
+		"caf\xE9 \xBB"
+	if got := data(t, r, w, raw); !strings.HasPrefix(got, "250") {
+		t.Fatal(got)
+	}
+	if len(backend.inputs) != 1 {
+		t.Fatalf("expected one delivery, got %d", len(backend.inputs))
+	}
+	got := backend.inputs[0]
+	if got.Subject != "café" || got.FromName != "Jörg" || got.Body != "café »\r\n" {
+		t.Fatalf("latin-1 message not decoded: subject=%q from_name=%q body=%q", got.Subject, got.FromName, got.Body)
+	}
+	for _, s := range []string{got.Subject, got.FromName, got.Body} {
+		if !utf8.ValidString(s) {
+			t.Fatalf("decoded field is not valid UTF-8: %q", s)
+		}
 	}
 }
 

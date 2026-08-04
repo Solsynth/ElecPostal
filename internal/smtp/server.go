@@ -25,6 +25,7 @@ import (
 
 	"src.solsynth.dev/sosys/elecpostal/internal/config"
 	"src.solsynth.dev/sosys/elecpostal/internal/database"
+	"src.solsynth.dev/sosys/elecpostal/internal/mailtext"
 	"src.solsynth.dev/sosys/elecpostal/internal/relay"
 	"src.solsynth.dev/sosys/elecpostal/internal/service"
 )
@@ -350,9 +351,9 @@ func parseMessage(raw []byte, envelopeFrom string, envelopeRecipients []recipien
 		result.id = "<" + uuid.NewString() + "@elecpostal>"
 	}
 	if from, err := m.Header.AddressList("From"); err == nil && len(from) > 0 {
-		result.fromAddress, result.fromName = strings.ToLower(from[0].Address), from[0].Name
+		result.fromAddress, result.fromName = strings.ToLower(from[0].Address), mailtext.DecodeHeader(from[0].Name)
 	}
-	result.subject, result.to, result.cc = decodeHeader(m.Header.Get("Subject")), addresses(m.Header, "To", "to"), addresses(m.Header, "Cc", "cc")
+	result.subject, result.to, result.cc = mailtext.DecodeHeader(m.Header.Get("Subject")), addresses(m.Header, "To", "to"), addresses(m.Header, "Cc", "cc")
 	if len(result.to) == 0 {
 		for _, r := range envelopeRecipients {
 			result.to = append(result.to, service.RecipientInput{Address: r.address, Kind: "to"})
@@ -370,13 +371,6 @@ func parseMessage(raw []byte, envelopeFrom string, envelopeRecipients []recipien
 	result.attachments = attachments
 	return result, nil
 }
-func decodeHeader(v string) string {
-	decoded, err := new(mime.WordDecoder).DecodeHeader(v)
-	if err != nil {
-		return v
-	}
-	return decoded
-}
 func addresses(h mail.Header, key, kind string) []service.RecipientInput {
 	list, err := h.AddressList(key)
 	if err != nil {
@@ -384,7 +378,7 @@ func addresses(h mail.Header, key, kind string) []service.RecipientInput {
 	}
 	result := make([]service.RecipientInput, 0, len(list))
 	for _, a := range list {
-		result = append(result, service.RecipientInput{Address: strings.ToLower(a.Address), Name: a.Name, Kind: kind})
+		result = append(result, service.RecipientInput{Address: strings.ToLower(a.Address), Name: mailtext.DecodeHeader(a.Name), Kind: kind})
 	}
 	return result
 }
@@ -426,9 +420,9 @@ func parseEntity(header mail.Header, body io.Reader) (string, string, []storedAt
 	if err != nil {
 		return "", "", nil, err
 	}
-	filename := dparams["filename"]
+	filename := mailtext.DecodeHeader(dparams["filename"])
 	if filename == "" {
-		filename = params["name"]
+		filename = mailtext.DecodeHeader(params["name"])
 	}
 	if strings.EqualFold(disposition, "attachment") || strings.EqualFold(disposition, "inline") || filename != "" || contentID != "" {
 		if filename == "" {
@@ -437,9 +431,9 @@ func parseEntity(header mail.Header, body io.Reader) (string, string, []storedAt
 		return "", "", []storedAttachment{{filename: filepath.Base(filename), mimeType: mediaType, contentID: contentID, disposition: strings.ToLower(disposition), content: data}}, nil
 	}
 	if strings.EqualFold(mediaType, "text/html") {
-		return "", string(data), nil, nil
+		return "", mailtext.DecodeBody(data, params["charset"]), nil, nil
 	}
-	return string(data), "", nil, nil
+	return mailtext.DecodeBody(data, params["charset"]), "", nil, nil
 }
 func decodeTransfer(encoding string, body io.Reader) io.Reader {
 	switch strings.ToLower(strings.TrimSpace(encoding)) {
