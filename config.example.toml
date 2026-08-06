@@ -14,6 +14,7 @@ dsn = "host=postgres port=5432 user=dyson password=dyson dbname=elec_postal sslm
 
 [redis]
 addr = ""
+db = 0
 
 [nats]
 # Set target in production to enable durable, horizontally scalable SMTP ingestion.

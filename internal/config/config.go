@@ -45,6 +45,7 @@ type DatabaseConfig struct {
 
 type RedisConfig struct {
 	Addr string `mapstructure:"addr"`
+	DB   int    `mapstructure:"db"`
 }
 
 // NATSConfig configures durable JetStream ingestion for inbound SMTP.
@@ -165,6 +166,7 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("grpc.keyFile", "")
 	v.SetDefault("database.dsn", "")
 	v.SetDefault("redis.addr", "")
+	v.SetDefault("redis.db", 0)
 	v.SetDefault("nats.target", "")
 	v.SetDefault("nats.stream", "ELECPOSTAL_INBOUND")
 	v.SetDefault("nats.subject", "elecpostal.smtp.inbound")
