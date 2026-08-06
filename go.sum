@@ -310,3 +310,5 @@ src.solsynth.dev/sosys/go v0.2.1-0.20260728110849-bc24e73f9cd2 h1:pQv0GacJrXusWi
 src.solsynth.dev/sosys/go v0.2.1-0.20260728110849-bc24e73f9cd2/go.mod h1:obFYNjrUVgYLSHG30YlXUqFKvC+EejGTTuc7Aix8ugY=
 src.solsynth.dev/sosys/go v0.2.1-0.20260806093737-26adce6c502f h1:rLhUGrCK/MZ2HzRKTY7ARPAVzZ0cv8511pfwXjov/dc=
 src.solsynth.dev/sosys/go v0.2.1-0.20260806093737-26adce6c502f/go.mod h1:0Z0jNGBJNBDzN6ZkWGdXRCm01nn08b5aMZKNFLLDwXc=
+src.solsynth.dev/sosys/go v0.2.1-0.20260806100538-e3430ca507d0 h1:FsZf5Fxw6IM/FxScxMGYKLXpgJ0OwCcqlxFYLC5JsY4=
+src.solsynth.dev/sosys/go v0.2.1-0.20260806100538-e3430ca507d0/go.mod h1:0Z0jNGBJNBDzN6ZkWGdXRCm01nn08b5aMZKNFLLDwXc=
