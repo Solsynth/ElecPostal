@@ -32,6 +32,8 @@ type fakeBackend struct {
 	mailboxSenders map[string]map[string]bool
 	defaultBox     *database.Mailbox
 	authOK         bool
+	quotaErr       error
+	reservations   []string
 	inputs         []service.ReceiveEmailInput
 	outbound       []relay.Message
 	mu             sync.Mutex
@@ -61,6 +63,12 @@ func (f *fakeBackend) ReceiveEmail(_ context.Context, input service.ReceiveEmail
 	defer f.mu.Unlock()
 	f.inputs = append(f.inputs, input)
 	return &database.Email{ID: "received"}, nil
+}
+func (f *fakeBackend) ReserveOutboundSend(_ context.Context, mailboxID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reservations = append(f.reservations, mailboxID)
+	return f.quotaErr
 }
 
 func (f *fakeBackend) SendOutbound(_ context.Context, message relay.Message) error {
@@ -325,12 +333,45 @@ func TestSMTPSubmissionRelaysExternalRecipients(t *testing.T) {
 		t.Fatalf("outbound: %#v", backend.outbound)
 	}
 	outbound := backend.outbound[0]
+
 	if outbound.FromAddress != "alice@example.test" || outbound.Subject != "Submission" {
 		t.Fatalf("outbound envelope: %#v", outbound)
 	}
 	gotTo, gotCc, gotBcc := strings.Join(outbound.To, ","), strings.Join(outbound.Cc, ","), strings.Join(outbound.Bcc, ",")
 	if gotTo != "friend@external.test" || gotCc != "cc@external.test" || gotBcc != "hidden@external.test" {
 		t.Fatalf("outbound recipients: to=%q cc=%q bcc=%q", gotTo, gotCc, gotBcc)
+	}
+}
+
+func TestSMTPSubmissionEnforcesSendQuota(t *testing.T) {
+	backend := &fakeBackend{
+		authOK:         true,
+		quotaErr:       service.ErrSendLimitExceeded,
+		mailboxSenders: map[string]map[string]bool{"alice-box": {"alice@example.test": true}},
+	}
+	r, w, conn := newSession(t, backend, "587")
+	defer conn.Close()
+	_ = command(t, r, w, "EHLO test")
+	encoded := "AGFsaWNlQGV4YW1wbGUudGVzdABzZWNyZXQ="
+	if got := command(t, r, w, "AUTH PLAIN "+encoded); !strings.HasPrefix(got, "235") {
+		t.Fatalf("authentication failed: %q", got)
+	}
+	if got := command(t, r, w, "MAIL FROM:<alice@example.test>"); !strings.HasPrefix(got, "250") {
+		t.Fatalf("mail from rejected: %q", got)
+	}
+	if got := command(t, r, w, "RCPT TO:<friend@external.test>"); !strings.HasPrefix(got, "250") {
+		t.Fatalf("recipient rejected: %q", got)
+	}
+	if got := data(t, r, w, "From: Alice <alice@example.test>\r\nTo: friend@external.test\r\nSubject: Over quota\r\n\r\nbody"); got != "452 4.3.2 Outbound send limit exceeded" {
+		t.Fatalf("quota response = %q", got)
+	}
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if len(backend.reservations) != 1 || backend.reservations[0] != "alice-box" {
+		t.Fatalf("quota reservations = %#v", backend.reservations)
+	}
+	if len(backend.outbound) != 0 {
+		t.Fatalf("outbound delivery bypassed quota: %#v", backend.outbound)
 	}
 }
 

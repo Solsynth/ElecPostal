@@ -43,6 +43,7 @@ type Backend interface {
 	IsMailboxSender(context.Context, string, string) (bool, error)
 	AuthenticateMailProtocolAddress(context.Context, string, string, string) (*service.ProtocolPrincipal, error)
 	ReceiveEmail(context.Context, service.ReceiveEmailInput) (*database.Email, error)
+	ReserveOutboundSend(context.Context, string) error
 	SendOutbound(context.Context, relay.Message) error
 }
 
@@ -235,6 +236,9 @@ func (ss *smtpSession) Data(r io.Reader) error {
 // through the configured provider. The client keeps its own Sent copy via IMAP
 // APPEND, so no duplicate is created here.
 func (ss *smtpSession) submit(message parsedMessage, raw []byte) error {
+	if err := ss.server.service.ReserveOutboundSend(context.Background(), ss.principal.MailboxID); err != nil {
+		return submissionError(err)
+	}
 	local := make([]recipient, 0, len(ss.recipients))
 	var external relay.Message
 	external.FromAddress, external.FromName = message.fromAddress, message.fromName

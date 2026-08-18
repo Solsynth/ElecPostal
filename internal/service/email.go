@@ -1671,6 +1671,26 @@ func localRecipientInputs(addresses []string, kind string) []RecipientInput {
 	return result
 }
 
+// ReserveOutboundSend atomically reserves one outbound send against the
+// authenticated mailbox and its workspace limits.
+func (s *EmailService) ReserveOutboundSend(ctx context.Context, mailboxID string) error {
+	var mailbox database.Mailbox
+	if err := s.db.WithContext(ctx).Where("id = ?", mailboxID).First(&mailbox).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrNotFound
+		}
+		return err
+	}
+	limits, err := s.workspaceSendLimits(ctx, mailbox.WorkspaceID)
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		return reserveOutboundSend(tx, mailbox, limits, now)
+	})
+}
+
 // SendOutbound relays the external leg of an SMTP submission through the
 // configured provider. Local recipients are delivered directly by the SMTP
 // session, so the message passed here only contains recipients that are not
