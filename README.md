@@ -43,12 +43,12 @@ persists the email.
 
 ## Workspace email quota
 
-Mailboxes belong to a workspace. ElecPostal reads that workspace's plan quota
-and reserves 10% for raw email records in its database (for example, a 10 GB
-plan allows 1 GB of active email). DysonFS attachment content is excluded from
-this calculation because it is already counted by DysonFS. When the allowance
-is exceeded, ElecPostal archives the oldest messages and permanently removes
-their raw records after 30 days.
+- Mailboxes belong to a workspace. ElecPostal reports raw email bytes as one
+  consumer of the workspace's shared storage quota. DysonFS reports attachment
+  bytes separately; Valve aggregates both services and periodically refreshes
+  the workspace usage snapshot. When the shared limit is exceeded, ElecPostal
+  archives the oldest messages and permanently removes their raw records after
+  30 days.
 
 ## Outbound send limits
 

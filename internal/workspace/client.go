@@ -74,6 +74,12 @@ func NewClient(target string, useTLS, tlsSkipVerify bool) (*Client, error) {
 	return &Client{conn: conn, client: gen.NewDyWorkspaceServiceClient(conn), sendLimits: DefaultSendLimitPolicy()}, nil
 }
 
+// QuotaClient returns a client for the aggregate storage quota surface on the
+// same gRPC endpoint.
+func (c *Client) QuotaClient() gen.DyQuotaServiceClient {
+	return gen.NewDyQuotaServiceClient(c.conn)
+}
+
 // SetSendLimitPolicy applies deployment-specific plan limits.
 func (c *Client) SetSendLimitPolicy(policy SendLimitPolicy) { c.sendLimits = policy }
 
@@ -97,7 +103,10 @@ func (c *Client) PlanStorageBytes(ctx context.Context, workspaceID string) (int6
 	if err != nil {
 		return 0, fmt.Errorf("get workspace: %w", err)
 	}
-	quota, err := c.client.GetPlanQuota(ctx, &gen.DyGetPlanQuotaRequest{Plan: workspace.GetPlan()})
+	quota, err := c.client.GetPlanQuota(ctx, &gen.DyGetPlanQuotaRequest{
+		Plan:        workspace.GetPlan(),
+		WorkspaceId: workspaceID,
+	})
 	if err != nil {
 		return 0, fmt.Errorf("get workspace plan quota: %w", err)
 	}

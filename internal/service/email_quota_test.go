@@ -27,9 +27,3 @@ func TestOutgoingRawSizeExcludesDysonFSAttachments(t *testing.T) {
 	}
 }
 
-func TestMailboxStorageFraction(t *testing.T) {
-	const planStorage = int64(10 * 1024 * 1024 * 1024)
-	if got, want := planStorage/mailStorageFractionDivisor, int64(1024*1024*1024); got != want {
-		t.Fatalf("mail quota = %d, want %d", got, want)
-	}
-}

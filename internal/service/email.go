@@ -22,6 +22,7 @@ import (
 	"src.solsynth.dev/sosys/elecpostal/internal/realtime"
 	"src.solsynth.dev/sosys/elecpostal/internal/relay"
 	"src.solsynth.dev/sosys/elecpostal/internal/workspace"
+	gen "src.solsynth.dev/sosys/go/proto"
 )
 
 var (
@@ -40,9 +41,8 @@ var reservedMailboxLocalParts = map[string]struct{}{
 }
 
 const (
-	mailStorageFractionDivisor int64 = 10
-	archiveRetention                 = 30 * 24 * time.Hour
-	sendUsageRetention               = 62 * 24 * time.Hour
+	archiveRetention   = 30 * 24 * time.Hour
+	sendUsageRetention = 62 * 24 * time.Hour
 )
 
 // RecipientInput is a recipient for a new email.
@@ -189,8 +189,8 @@ const (
 	folderArchive = "archive"
 )
 
-// MailboxQuota reports the active raw-email storage reserved from a workspace
-// plan. Attachments are excluded because DysonFS already charges them.
+// MailboxQuota reports the workspace's shared storage usage and limit.
+// Attachment bytes are excluded because DysonFS reports them separately.
 type MailboxQuota struct {
 	WorkspaceID    string `json:"workspace_id"`
 	UsedBytes      int64  `json:"used_bytes"`
@@ -235,17 +235,18 @@ type WorkspaceCustomDomainUsage struct {
 
 // EmailService handles email-related business logic.
 type EmailService struct {
-	db         *database.DB
-	notifier   NotificationSender
-	realtime   realtime.Publisher
-	files      filesystem.Uploader
-	relay      relay.Adapter
-	workspace  workspace.Provider
-	identities relay.IdentityManager
-	domain     string
-	inbound    string
-	dns        relay.DNSChecker
-	dnsLabel   string
+	db                *database.DB
+	notifier          NotificationSender
+	realtime          realtime.Publisher
+	files             filesystem.Uploader
+	relay             relay.Adapter
+	workspace         workspace.Provider
+	sharedQuotaClient gen.DyQuotaServiceClient
+	identities        relay.IdentityManager
+	domain            string
+	inbound           string
+	dns               relay.DNSChecker
+	dnsLabel          string
 }
 
 // SetRelay configures outbound delivery. A nil adapter retains the existing
@@ -398,6 +399,11 @@ func (s *EmailService) SetAttachmentUploader(uploader filesystem.Uploader) {
 // mail allowance from the workspace plan's storage quota.
 func (s *EmailService) SetWorkspaceProvider(provider workspace.Provider) {
 	s.workspace = provider
+}
+
+// SetSharedQuotaClient enables aggregate workspace storage usage checks.
+func (s *EmailService) SetSharedQuotaClient(client gen.DyQuotaServiceClient) {
+	s.sharedQuotaClient = client
 }
 
 // Close releases resources held by optional downstream clients.
@@ -1164,8 +1170,8 @@ func appendUnique(values []string, value string) []string {
 	return append(values, value)
 }
 
-// GetMailboxQuota returns the 10% raw-email allocation and its current use
-// for the mailbox's workspace.
+// GetMailboxQuota returns the shared storage usage and limit for the
+// mailbox's workspace.
 func (s *EmailService) GetMailboxQuota(ctx context.Context, accountID uuid.UUID, mailboxID string) (MailboxQuota, error) {
 	var mailbox database.Mailbox
 	if err := s.db.WithContext(ctx).Where("id = ? AND account_id = ?", mailboxID, accountID).First(&mailbox).Error; err != nil {
@@ -2133,15 +2139,27 @@ func (s *EmailService) authorizeWorkspaceMember(ctx context.Context, workspaceID
 // Archived messages are excluded from the active mailbox budget and receive a
 // fixed 30-day deletion deadline.
 func (s *EmailService) enforceWorkspaceMailboxQuota(ctx context.Context, workspaceID string, limit int64) error {
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var used int64
-		if err := tx.Model(&database.Email{}).
-			Select("COALESCE(SUM(emails.raw_size_bytes), 0)").
-			Joins("JOIN mailboxes ON mailboxes.id = emails.mailbox_id AND mailboxes.deleted_at IS NULL").
-			Where("mailboxes.workspace_id = ? AND emails.archived_at IS NULL", workspaceID).
-			Scan(&used).Error; err != nil {
-			return fmt.Errorf("calculate workspace mail usage: %w", err)
+	var sharedUsed int64
+	if s.sharedQuotaClient != nil {
+		usage, err := s.sharedQuotaClient.GetUsedQuota(ctx, &gen.DyGetUsedQuotaRequest{WorkspaceId: workspaceID})
+		if err != nil {
+			return fmt.Errorf("get shared workspace storage usage: %w", err)
 		}
+		sharedUsed = usage.GetUsedBytes()
+	}
+
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		used := sharedUsed
+		if s.sharedQuotaClient == nil {
+			if err := tx.Model(&database.Email{}).
+				Select("COALESCE(SUM(emails.raw_size_bytes), 0)").
+				Joins("JOIN mailboxes ON mailboxes.id = emails.mailbox_id AND mailboxes.deleted_at IS NULL").
+				Where("mailboxes.workspace_id = ? AND emails.archived_at IS NULL", workspaceID).
+				Scan(&used).Error; err != nil {
+				return fmt.Errorf("calculate workspace mail usage: %w", err)
+			}
+		}
+
 		deadline := time.Now().Add(archiveRetention)
 		for used > limit {
 			var oldest database.Email
@@ -2165,6 +2183,13 @@ func (s *EmailService) workspaceMailboxUsage(ctx context.Context, workspaceID st
 	if err != nil {
 		return 0, 0, err
 	}
+	if s.sharedQuotaClient != nil {
+		usage, err := s.sharedQuotaClient.GetUsedQuota(ctx, &gen.DyGetUsedQuotaRequest{WorkspaceId: workspaceID})
+		if err != nil {
+			return 0, 0, fmt.Errorf("get shared workspace storage usage: %w", err)
+		}
+		return limit, usage.GetUsedBytes(), nil
+	}
 	err = s.db.WithContext(ctx).Model(&database.Email{}).
 		Select("COALESCE(SUM(emails.raw_size_bytes), 0)").
 		Joins("JOIN mailboxes ON mailboxes.id = emails.mailbox_id AND mailboxes.deleted_at IS NULL").
@@ -2184,11 +2209,10 @@ func (s *EmailService) workspaceMailboxLimit(ctx context.Context, workspaceID st
 	if err != nil {
 		return 0, fmt.Errorf("get workspace mail quota: %w", err)
 	}
-	limit := totalBytes / mailStorageFractionDivisor
-	if limit <= 0 {
+	if totalBytes <= 0 {
 		return 0, fmt.Errorf("workspace mail quota is zero")
 	}
-	return limit, nil
+	return totalBytes, nil
 }
 
 func (s *EmailService) workspaceSendLimits(ctx context.Context, workspaceID string) (workspace.SendLimits, error) {

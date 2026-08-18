@@ -256,9 +256,10 @@ relay attachment byte-source is configured.
 
 `GET /api/mailboxes/{mailbox-id}/quota`
 
-Returns the raw-email allocation for the mailbox's workspace. The allocation is
-10% of the workspace plan's storage quota; attachment bytes are excluded because
-DysonFS has already accounted for them.
+Returns the workspace's shared storage usage. Valve periodically aggregates the
+raw email bytes reported by ElecPostal with bytes reported by other storage
+services, including DysonFS. Attachment bytes are excluded because DysonFS
+reports them separately.
 
 ```json
 {

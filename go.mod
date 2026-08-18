@@ -21,8 +21,9 @@ require (
 	google.golang.org/grpc v1.79.1
 	gorm.io/datatypes v1.2.7
 	gorm.io/driver/postgres v1.5.11
+	gorm.io/driver/sqlite v1.4.3
 	gorm.io/gorm v1.30.5
-	src.solsynth.dev/sosys/go v0.2.1-0.20260817035558-00476bd5bb78
+	src.solsynth.dev/sosys/go v0.2.1-0.20260818160829-1282a633a84f
 )
 
 require (
@@ -67,6 +68,7 @@ require (
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/mattn/go-sqlite3 v1.14.15 // indirect
 	github.com/microsoft/go-mssqldb v1.9.2 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect

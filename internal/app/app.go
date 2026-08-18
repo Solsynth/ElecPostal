@@ -16,6 +16,7 @@ import (
 	"src.solsynth.dev/sosys/elecpostal/internal/config"
 	"src.solsynth.dev/sosys/elecpostal/internal/database"
 	"src.solsynth.dev/sosys/elecpostal/internal/filesystem"
+	"src.solsynth.dev/sosys/elecpostal/internal/grpcsvc"
 	"src.solsynth.dev/sosys/elecpostal/internal/imap"
 	"src.solsynth.dev/sosys/elecpostal/internal/logging"
 	"src.solsynth.dev/sosys/elecpostal/internal/pop3"
@@ -124,6 +125,7 @@ func New(cfg *config.Config) (*App, error) {
 			Enterprise: sendLimitsFromConfig(cfg.Mail.SendLimits.Enterprise),
 		})
 		emailSvc.SetWorkspaceProvider(workspaceClient)
+		emailSvc.SetSharedQuotaClient(workspaceClient.QuotaClient())
 		logging.Log.Info().Str("target", cfg.Workspace.Target).Msg("workspace quota provider configured")
 	}
 	router := server.NewRouter(cfg, emailSvc)
@@ -188,6 +190,7 @@ func New(cfg *config.Config) (*App, error) {
 	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
 	healthServer.SetServingStatus(healthServiceName, healthpb.HealthCheckResponse_SERVING)
 	healthpb.RegisterHealthServer(grpcSrv, healthServer)
+	grpcsvc.RegisterQuotaService(grpcSrv, emailSvc)
 	reflection.Register(grpcSrv)
 
 	return &App{
