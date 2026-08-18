@@ -101,10 +101,16 @@ func (c *Client) PlanStorageBytes(ctx context.Context, workspaceID string) (int6
 	if err != nil {
 		return 0, fmt.Errorf("get workspace plan quota: %w", err)
 	}
-	if quota.GetMaxStorageBytes() <= 0 {
+	totalBytes, ok := storageBytesFromQuota(quota)
+	if !ok {
 		return 0, fmt.Errorf("workspace plan has no storage quota")
 	}
-	return quota.GetMaxStorageBytes(), nil
+	return totalBytes, nil
+}
+
+func storageBytesFromQuota(quota *gen.DyWorkspacePlanQuota) (int64, bool) {
+	totalBytes, ok := quota.GetQuotas()["max_storage_bytes"]
+	return totalBytes, ok && totalBytes > 0
 }
 
 // MailboxLimit returns the maximum number of mailboxes permitted by a
