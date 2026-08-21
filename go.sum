@@ -306,3 +306,5 @@ nullprogram.com/x/optparse v1.0.0/go.mod h1:KdyPE+Igbe0jQUrVfMqDMeJQIJZEuyV7pjYm
 rsc.io/pdf v0.1.1/go.mod h1:n8OzWcQ6Sp37PL01nO98y4iUCRdTGarVfzxY20ICaU4=
 src.solsynth.dev/sosys/go v0.2.1-0.20260818160829-1282a633a84f h1:SAXND6Pqs1tzelLPilWRQ4lT2lx+SyukaTGHir06oMw=
 src.solsynth.dev/sosys/go v0.2.1-0.20260818160829-1282a633a84f/go.mod h1:0Z0jNGBJNBDzN6ZkWGdXRCm01nn08b5aMZKNFLLDwXc=
+src.solsynth.dev/sosys/go v0.2.1-0.20260821135654-f626a5b8218f h1:mi0YyhA7aSZBSG4ZW8R04S944y2HQY+SEo36gleNzME=
+src.solsynth.dev/sosys/go v0.2.1-0.20260821135654-f626a5b8218f/go.mod h1:0Z0jNGBJNBDzN6ZkWGdXRCm01nn08b5aMZKNFLLDwXc=
