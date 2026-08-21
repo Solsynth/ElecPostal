@@ -112,6 +112,7 @@ type Email struct {
 	IsDraft               bool           `gorm:"index:idx_emails_is_draft" json:"is_draft"`
 	Folder                string         `gorm:"index:idx_emails_folder;size:16" json:"folder"`
 	ContentType           string         `gorm:"size:32" json:"content_type"`
+	IsDmarcIntake         bool           `gorm:"index:idx_emails_is_dmarc_intake" json:"is_dmarc_intake"`
 	ScheduledAt           *time.Time     `gorm:"index" json:"scheduled_at,omitempty"`
 	TrashedAt             *time.Time     `gorm:"index" json:"trashed_at,omitempty"`
 	SpamAt                *time.Time     `gorm:"index" json:"spam_at,omitempty"`
@@ -234,6 +235,65 @@ type MessageSource struct {
 func (s *MessageSource) BeforeCreate(tx *gorm.DB) error {
 	if s.ID == "" {
 		s.ID = NewID()
+	}
+	return nil
+}
+
+// DmarcReport stores a parsed DMARC aggregate report linked to its original
+// received email. The raw email and attachments remain in the normal message
+// store for audit and reprocessing.
+type DmarcReport struct {
+	ID              string     `gorm:"primaryKey;size:36" json:"id"`
+	EmailID         string     `gorm:"index:idx_dmarc_reports_email_id;size:36" json:"email_id"`
+	AccountID       uuid.UUID  `gorm:"index:idx_dmarc_reports_account_id" json:"account_id"`
+	MailboxID       string     `gorm:"index:idx_dmarc_reports_mailbox_id;size:36" json:"mailbox_id"`
+	AttachmentName  string     `gorm:"size:255" json:"attachment_name"`
+	ReporterOrg     string     `gorm:"size:255" json:"reporter_org"`
+	ReporterEmail   string     `gorm:"size:255" json:"reporter_email"`
+	ReportID        string     `gorm:"size:255" json:"report_id"`
+	DateBegin       *time.Time `json:"date_begin,omitempty"`
+	DateEnd         *time.Time `json:"date_end,omitempty"`
+	Domain          string     `gorm:"size:255" json:"domain"`
+	ADKIM           string     `gorm:"size:16" json:"adkim"`
+	ASPF            string     `gorm:"size:16" json:"aspf"`
+	Policy          string     `gorm:"size:16" json:"policy"`
+	SubdomainPolicy string     `gorm:"size:16" json:"subdomain_policy"`
+	Percentage      int        `json:"percentage"`
+	ParseStatus     string     `gorm:"index;size:16" json:"parse_status"`
+	ParseError      string     `gorm:"type:text" json:"parse_error,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+
+	Email   *Email              `gorm:"foreignKey:EmailID;references:ID" json:"email,omitempty"`
+	Records []DmarcReportRecord `gorm:"foreignKey:ReportID;references:ID" json:"records,omitempty"`
+}
+
+func (r *DmarcReport) BeforeCreate(tx *gorm.DB) error {
+	if r.ID == "" {
+		r.ID = NewID()
+	}
+	return nil
+}
+
+// DmarcReportRecord stores one source-IP evaluation row from a DMARC report.
+type DmarcReportRecord struct {
+	ID           string    `gorm:"primaryKey;size:36" json:"id"`
+	ReportID     string    `gorm:"index:idx_dmarc_report_records_report_id;size:36" json:"report_id"`
+	SourceIP     string    `gorm:"size:64" json:"source_ip"`
+	Count        int64     `json:"count"`
+	Disposition  string    `gorm:"size:32" json:"disposition"`
+	DKIM         string    `gorm:"size:32" json:"dkim"`
+	SPF          string    `gorm:"size:32" json:"spf"`
+	HeaderFrom   string    `gorm:"size:255" json:"header_from"`
+	EnvelopeFrom string    `gorm:"size:255" json:"envelope_from"`
+	EnvelopeTo   string    `gorm:"size:255" json:"envelope_to"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+func (r *DmarcReportRecord) BeforeCreate(tx *gorm.DB) error {
+	if r.ID == "" {
+		r.ID = NewID()
 	}
 	return nil
 }

@@ -76,6 +76,12 @@ func RegisterRoutes(r *gin.RouterGroup, emailSvc *service.EmailService) {
 		credentials.POST("", func(c *gin.Context) { createMailCredential(c, emailSvc) })
 		credentials.DELETE("/:id", func(c *gin.Context) { deleteMailCredential(c, emailSvc) })
 	}
+	admin := r.Group("/admin")
+	{
+		dmarc := admin.Group("/dmarc")
+		dmarc.GET("/reports", func(c *gin.Context) { listDmarcReports(c, emailSvc) })
+		dmarc.GET("/reports/:id", func(c *gin.Context) { getDmarcReport(c, emailSvc) })
+	}
 
 	customDomains := r.Group("/custom-domains")
 	{
@@ -649,6 +655,45 @@ func deleteMailCredential(c *gin.Context, emailSvc *service.EmailService) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func listDmarcReports(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	take := 20
+	offset := 0
+	if parsed, err := strconv.Atoi(c.DefaultQuery("take", "20")); err == nil && parsed > 0 && parsed <= 200 {
+		take = parsed
+	}
+	if parsed, err := strconv.Atoi(c.DefaultQuery("offset", "0")); err == nil && parsed >= 0 {
+		offset = parsed
+	}
+	reports, total, err := emailSvc.ListDmarcReports(c.Request.Context(), uuid.MustParse(accountID), service.ListDmarcReportsInput{
+		Offset: offset,
+		Take:   take,
+		Status: strings.TrimSpace(c.Query("status")),
+		Domain: strings.TrimSpace(c.Query("domain")),
+	})
+	if err != nil {
+		renderServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"items": reports, "total": total, "offset": offset, "take": take})
+}
+
+func getDmarcReport(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	report, err := emailSvc.GetDmarcReport(c.Request.Context(), uuid.MustParse(accountID), c.Param("id"))
+	if err != nil {
+		renderServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, report)
 }
 
 func parseListInput(c *gin.Context) service.ListInput {

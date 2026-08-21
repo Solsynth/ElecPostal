@@ -551,6 +551,50 @@ once.
 Returns `{"ok":true}`. Revocation immediately prevents future mail-protocol
 logins with that secret.
 
+## DMARC administration
+
+Reports sent to `dmarc@{mail.domain}` are accepted as a system intake address.
+The original email and attachments remain in message storage, while parsed
+aggregate data is stored for administrative review. DMARC intake messages are
+excluded from normal mailbox folders and message statistics.
+
+### List reports
+
+`GET /api/admin/dmarc/reports?offset=0&take=20&status=parsed&domain=example.com`
+
+The endpoint is scoped to the authenticated account. `status` may be `parsed`
+or `failed`; `domain` filters by the published DMARC domain. The response is:
+
+```json
+{
+  "items": [
+    {
+      "id": "01J...",
+      "email_id": "01J...",
+      "attachment_name": "report.xml.gz",
+      "reporter_org": "Example Provider",
+      "reporter_email": "dmarc@example.net",
+      "report_id": "provider-2026-08-21",
+      "domain": "solarpass.one",
+      "policy": "quarantine",
+      "parse_status": "parsed",
+      "records": []
+    }
+  ],
+  "total": 1,
+  "offset": 0,
+  "take": 20
+}
+```
+
+### Get a report
+
+`GET /api/admin/dmarc/reports/{report-id}`
+
+Returns the report records and the linked original email metadata and
+attachment metadata. Failed parses include `parse_error` and remain available
+for review.
+
 ## Health
 
 `GET /health`

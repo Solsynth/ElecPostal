@@ -16,6 +16,7 @@ import (
 	"gorm.io/gorm"
 
 	"src.solsynth.dev/sosys/elecpostal/internal/database"
+	"src.solsynth.dev/sosys/elecpostal/internal/dmarc"
 	"src.solsynth.dev/sosys/elecpostal/internal/filesystem"
 	"src.solsynth.dev/sosys/elecpostal/internal/logging"
 	"src.solsynth.dev/sosys/elecpostal/internal/mailtext"
@@ -36,7 +37,7 @@ var (
 )
 
 var reservedMailboxLocalParts = map[string]struct{}{
-	"admin": {}, "administrator": {}, "abuse": {}, "hostmaster": {},
+	"admin": {}, "administrator": {}, "abuse": {}, "dmarc": {}, "hostmaster": {},
 	"postmaster": {}, "security": {}, "webmaster": {},
 }
 
@@ -115,6 +116,9 @@ type ReceiveEmailInput struct {
 	// DeliveredTo contains envelope recipients for this mailbox. It drives alias
 	// forwarding even when the alias was BCC'd and absent from message headers.
 	DeliveredTo []string
+	// DmarcIntake keeps reports out of normal mailbox folders while retaining
+	// the original email and attachments for administrative review.
+	DmarcIntake bool
 }
 
 // ListInput is pagination for list endpoints.
@@ -324,7 +328,9 @@ func (s *EmailService) ResolveLocalMailbox(ctx context.Context, address string) 
 	localPart := address[:at]
 	var mailbox database.Mailbox
 	query := s.db.WithContext(ctx)
-	if localPart == "postmaster" {
+	if localPart == "dmarc" {
+		query = query.Where("is_default = ?", true).Order("created_at ASC")
+	} else if localPart == "postmaster" {
 		// Legacy mailboxes store only their local-part. Full-address rows must
 		// still belong to the configured domain before becoming postmaster.
 		query = query.Where("is_default = ? AND (LOWER(address) NOT LIKE ? OR LOWER(address) LIKE ?)", true, "%@%", "%@"+s.domain).Order("created_at ASC")
@@ -892,7 +898,7 @@ func (s *EmailService) ListEmails(ctx context.Context, accountID uuid.UUID, mail
 // GetMailboxStats returns counts for an account's active messages. mailboxID
 // may be empty to aggregate all mailboxes.
 func (s *EmailService) GetMailboxStats(ctx context.Context, accountID uuid.UUID, mailboxID string) (MailboxStats, error) {
-	base := s.db.WithContext(ctx).Model(&database.Email{}).Where("account_id = ? AND archived_at IS NULL", accountID)
+	base := s.db.WithContext(ctx).Model(&database.Email{}).Where("account_id = ? AND archived_at IS NULL AND is_dmarc_intake = ?", accountID, false)
 	if strings.TrimSpace(mailboxID) != "" {
 		base = base.Where("mailbox_id = ?", mailboxID)
 	}
@@ -923,7 +929,7 @@ func (s *EmailService) GetMailboxStats(ctx context.Context, accountID uuid.UUID,
 }
 
 func (s *EmailService) emailListQuery(ctx context.Context, accountID uuid.UUID, input ListInput) *gorm.DB {
-	query := s.db.WithContext(ctx).Model(&database.Email{}).Where("emails.account_id = ? AND emails.archived_at IS NULL", accountID)
+	query := s.db.WithContext(ctx).Model(&database.Email{}).Where("emails.account_id = ? AND emails.archived_at IS NULL AND emails.is_dmarc_intake = ?", accountID, false)
 	if term := strings.TrimSpace(input.Query); term != "" {
 		like := "%" + strings.ToLower(term) + "%"
 		query = query.Where("(LOWER(emails.subject) LIKE ? OR LOWER(emails.body) LIKE ? OR LOWER(emails.from_address) LIKE ? OR LOWER(emails.from_name) LIKE ? OR EXISTS (SELECT 1 FROM recipients WHERE recipients.email_id = emails.id AND (LOWER(recipients.address) LIKE ? OR LOWER(recipients.name) LIKE ?)))", like, like, like, like, like, like)
@@ -962,6 +968,55 @@ func (s *EmailService) emailListQuery(ctx context.Context, accountID uuid.UUID, 
 		query = query.Where("emails.folder = ?", folder)
 	}
 	return query
+}
+
+type ListDmarcReportsInput struct {
+	Offset int
+	Take   int
+	Status string
+	Domain string
+}
+
+func (s *EmailService) ListDmarcReports(ctx context.Context, accountID uuid.UUID, input ListDmarcReportsInput) ([]database.DmarcReport, int64, error) {
+	if input.Take <= 0 {
+		input.Take = 20
+	}
+	if input.Take > 200 {
+		input.Take = 200
+	}
+	if input.Offset < 0 {
+		input.Offset = 0
+	}
+	query := s.db.WithContext(ctx).Model(&database.DmarcReport{}).Where("account_id = ?", accountID)
+	if status := strings.TrimSpace(input.Status); status != "" {
+		query = query.Where("parse_status = ?", status)
+	}
+	if domain := strings.TrimSpace(strings.ToLower(input.Domain)); domain != "" {
+		query = query.Where("LOWER(domain) = ?", domain)
+	}
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var reports []database.DmarcReport
+	if err := query.Order("created_at DESC").Offset(input.Offset).Limit(input.Take).
+		Preload("Records").Preload("Email").Preload("Email.Attachments").Find(&reports).Error; err != nil {
+		return nil, 0, err
+	}
+	return reports, total, nil
+}
+
+func (s *EmailService) GetDmarcReport(ctx context.Context, accountID uuid.UUID, id string) (*database.DmarcReport, error) {
+	var report database.DmarcReport
+	err := s.db.WithContext(ctx).Where("id = ? AND account_id = ?", id, accountID).
+		Preload("Records").Preload("Email").Preload("Email.Attachments").First(&report).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &report, nil
 }
 
 // ListBlockRules returns block rules owned by the account.
@@ -1745,6 +1800,21 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 		}
 		return nil, err
 	}
+	isDmarcIntake := input.DmarcIntake
+	for _, recipient := range input.DeliveredTo {
+		if isDmarcAddress(recipient) {
+			isDmarcIntake = true
+			break
+		}
+	}
+	if !isDmarcIntake {
+		for _, recipient := range append(append([]RecipientInput{}, input.To...), input.Cc...) {
+			if isDmarcAddress(recipient.Address) {
+				isDmarcIntake = true
+				break
+			}
+		}
+	}
 	logging.Log.Info().
 		Str("mailbox_id", mailbox.ID).
 		Int("attachment_count", len(input.Attachments)).
@@ -1777,6 +1847,7 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 		SentAt:         input.SentAt,
 		Folder:         folderInbox,
 		ContentType:    normalizeContentType(input.ContentType),
+		IsDmarcIntake:  isDmarcIntake,
 		Authentication: input.Authentication,
 	}
 	threadID := strings.TrimSpace(input.ThreadID)
@@ -1819,6 +1890,9 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 		if err := s.storeProtocolSourceTx(tx, &email, input.RawSource, input.EnvelopeFrom); err != nil {
 			return err
 		}
+		if isDmarcIntake {
+			return nil
+		}
 		return s.addInboxMembershipTx(tx, mailbox.ID, email.ID)
 	})
 	if err != nil {
@@ -1835,6 +1909,11 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 		}
 	}
 	s.publishMailEvent(ctx, email.AccountID.String(), "mail.created", &email)
+	if isDmarcIntake {
+		if err := s.persistDmarcReports(ctx, &email, input.RawSource); err != nil {
+			logging.Log.Warn().Err(err).Str("email_id", email.ID).Msg("failed to parse DMARC report")
+		}
+	}
 	forwardRecipients := input.DeliveredTo
 	if len(forwardRecipients) == 0 {
 		for _, recipient := range input.To {
@@ -1843,6 +1922,66 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 	}
 	s.forwardIncomingEmail(ctx, mailbox, email, forwardRecipients, len(attachments) > 0)
 	return &email, nil
+}
+
+func isDmarcAddress(address string) bool {
+	address = strings.ToLower(strings.TrimSpace(address))
+	at := strings.LastIndex(address, "@")
+	return at > 0 && address[:at] == "dmarc"
+}
+
+func (s *EmailService) persistDmarcReports(ctx context.Context, email *database.Email, raw []byte) error {
+	reports, parseErr := dmarc.Parse(raw)
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if parseErr != nil {
+			return tx.Create(&database.DmarcReport{
+				EmailID:     email.ID,
+				AccountID:   email.AccountID,
+				MailboxID:   email.MailboxID,
+				ParseStatus: "failed",
+				ParseError:  parseErr.Error(),
+			}).Error
+		}
+		for _, report := range reports {
+			row := database.DmarcReport{
+				EmailID:         email.ID,
+				AccountID:       email.AccountID,
+				MailboxID:       email.MailboxID,
+				AttachmentName:  report.AttachmentName,
+				ReporterOrg:     report.ReporterOrg,
+				ReporterEmail:   report.ReporterEmail,
+				ReportID:        report.ReportID,
+				DateBegin:       report.DateBegin,
+				DateEnd:         report.DateEnd,
+				Domain:          report.Domain,
+				ADKIM:           report.ADKIM,
+				ASPF:            report.ASPF,
+				Policy:          report.Policy,
+				SubdomainPolicy: report.SubdomainPolicy,
+				Percentage:      report.Percentage,
+				ParseStatus:     "parsed",
+			}
+			if err := tx.Create(&row).Error; err != nil {
+				return err
+			}
+			for _, record := range report.Records {
+				if err := tx.Create(&database.DmarcReportRecord{
+					ReportID:     row.ID,
+					SourceIP:     record.SourceIP,
+					Count:        record.Count,
+					Disposition:  record.Disposition,
+					DKIM:         record.DKIM,
+					SPF:          record.SPF,
+					HeaderFrom:   record.HeaderFrom,
+					EnvelopeFrom: record.EnvelopeFrom,
+					EnvelopeTo:   record.EnvelopeTo,
+				}).Error; err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
 }
 
 // forwardIncomingEmail is deliberately best-effort: a forwarding failure never

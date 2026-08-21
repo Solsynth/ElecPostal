@@ -51,8 +51,8 @@ func (d *DB) AutoMigrate() error {
 	if err := d.DB.AutoMigrate(
 		&Mailbox{}, &MailboxAlias{}, &MailForwarding{}, &CustomDomain{}, &Email{}, &Recipient{}, &Attachment{},
 		&MailProtocolCredential{}, &EmailLabel{}, &EmailLabelMapping{},
-		&MailSendUsage{}, &MailBlockRule{}, &MessageSource{}, &MailFolder{},
-		&FolderMessage{}, &MailOutbox{},
+		&MailSendUsage{}, &MailBlockRule{}, &MessageSource{}, &DmarcReport{},
+		&DmarcReportRecord{}, &MailFolder{}, &FolderMessage{}, &MailOutbox{},
 	); err != nil {
 		return err
 	}

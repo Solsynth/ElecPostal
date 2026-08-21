@@ -40,7 +40,7 @@ type fakeBackend struct {
 }
 
 func (f *fakeBackend) ResolveLocalMailbox(_ context.Context, address string) (*database.Mailbox, error) {
-	if address == "postmaster@example.test" && f.defaultBox != nil {
+	if (address == "postmaster@example.test" || address == "dmarc@example.test") && f.defaultBox != nil {
 		return f.defaultBox, nil
 	}
 	if box := f.mailboxes[address]; box != nil {
@@ -221,6 +221,22 @@ func TestSMTPPostmasterRoutesToDefaultMailbox(t *testing.T) {
 	}
 	if len(backend.inputs) != 1 || backend.inputs[0].MailboxID != "default" {
 		t.Fatalf("postmaster did not route to default: %#v", backend.inputs)
+	}
+}
+func TestSMTPDmarcRoutesToDefaultMailbox(t *testing.T) {
+	box := &database.Mailbox{ID: "default"}
+	backend := &fakeBackend{defaultBox: box, mailboxes: map[string]*database.Mailbox{}}
+	r, w, conn := newSession(t, backend, "25")
+	defer conn.Close()
+	setupMail(t, r, w, "dmarc@example.test")
+	if got := data(t, r, w, "Subject: DMARC report\r\n\r\nreport"); !strings.HasPrefix(got, "250") {
+		t.Fatal(got)
+	}
+	if len(backend.inputs) != 1 {
+		t.Fatalf("inputs=%#v", backend.inputs)
+	}
+	if backend.inputs[0].MailboxID != "default" || !backend.inputs[0].DmarcIntake {
+		t.Fatalf("dmarc intake=%#v", backend.inputs[0])
 	}
 }
 

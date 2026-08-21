@@ -170,21 +170,29 @@ func deliverJob(ctx context.Context, backend Backend, job deliveryJob) error {
 		if _, seen := unique[recipient.mailboxID]; seen {
 			continue
 		}
-		unique[recipient.mailboxID] = struct{}{}
 		attachments := make([]service.IncomingAttachment, 0, len(job.Attachments))
 		for _, attachment := range job.Attachments {
 			attachments = append(attachments, service.IncomingAttachment{Filename: attachment.Filename, MimeType: attachment.MimeType, Size: int64(len(attachment.Content)), ContentID: attachment.ContentID, Disposition: attachment.Disposition, Content: bytes.NewReader(attachment.Content)})
 		}
 		deliveredTo := make([]string, 0)
+		dmarcIntake := false
 		for _, candidate := range job.Recipients {
 			if candidate.mailboxID == recipient.mailboxID {
 				deliveredTo = append(deliveredTo, candidate.address)
+				if isDmarcRecipient(candidate.address) {
+					dmarcIntake = true
+				}
 			}
 		}
-		if _, err := backend.ReceiveEmail(ctx, service.ReceiveEmailInput{MailboxID: recipient.mailboxID, FromAddress: job.FromAddress, FromName: job.FromName, Subject: job.Subject, Body: job.Body, ContentType: job.ContentType, To: job.To, Cc: job.Cc, Attachments: attachments, SentAt: &job.ReceivedAt, Authentication: job.Authentication, RawSource: job.RawSource, EnvelopeFrom: job.EnvelopeFrom, DeliveredTo: deliveredTo}); err != nil {
+		if _, err := backend.ReceiveEmail(ctx, service.ReceiveEmailInput{MailboxID: recipient.mailboxID, FromAddress: job.FromAddress, FromName: job.FromName, Subject: job.Subject, Body: job.Body, ContentType: job.ContentType, To: job.To, Cc: job.Cc, Attachments: attachments, SentAt: &job.ReceivedAt, Authentication: job.Authentication, RawSource: job.RawSource, EnvelopeFrom: job.EnvelopeFrom, DeliveredTo: deliveredTo, DmarcIntake: dmarcIntake}); err != nil {
 			return err
 		}
 	}
 	logging.Log.Info().Str("smtp_message_id", job.MessageID).Int("recipient_count", len(unique)).Msg("SMTP queued message delivered")
 	return nil
+}
+func isDmarcRecipient(address string) bool {
+	address = strings.ToLower(strings.TrimSpace(address))
+	at := strings.LastIndex(address, "@")
+	return at > 0 && address[:at] == "dmarc"
 }
