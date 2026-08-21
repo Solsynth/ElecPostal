@@ -25,7 +25,7 @@ func TestMatchesSet(t *testing.T) {
 }
 
 func TestSearchMatch(t *testing.T) {
-	message := service.ProtocolMessage{UID: 7, Flags: []string{"\\Seen"}, Raw: []byte("From: sender@example.test\r\nSubject: Invoice\r\n\r\nreceipt")}
+	message := service.ProtocolMessage{UID: 7, Flags: []string{"\\Seen"}, Subject: "Invoice", Body: "receipt"}
 	for _, terms := range [][]string{{"SEEN"}, {"SUBJECT", "invoice"}, {"TEXT", "receipt"}, {"UID", "7"}} {
 		if !searchMatch(message, terms) {
 			t.Fatalf("expected match for %v", terms)

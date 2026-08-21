@@ -6,6 +6,7 @@ package relay
 import (
 	"context"
 	"fmt"
+	"io"
 )
 
 // Message is the provider-neutral representation of an outgoing email.
@@ -22,6 +23,22 @@ type Message struct {
 	ContentType   string
 	ThreadID      string
 	AttachmentIDs []string
+	Attachments   []AttachmentMetadata
+}
+
+// AttachmentMetadata is the immutable metadata required to reconstruct a MIME
+// part around a DysonFS attachment.
+type AttachmentMetadata struct {
+	ID          string
+	Filename    string
+	MimeType    string
+	Size        int64
+	ContentID   string
+	Disposition string
+}
+
+type AttachmentSource interface {
+	Open(context.Context, string) (io.ReadCloser, AttachmentMetadata, error)
 }
 
 // DeliveryResult is provider metadata returned after an outbound provider has

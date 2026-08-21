@@ -6,6 +6,7 @@ package filesystem
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -32,9 +33,18 @@ type AttachmentUpload struct {
 	Content     io.Reader
 }
 
-// Uploader stores attachment content and returns its Drive file reference.
-type Uploader interface {
+// AttachmentReader exposes a fresh DysonFS metadata snapshot and a streaming
+// reader for its content. Callers must close Content.
+type AttachmentReader struct {
+	File    database.CloudFileReferenceObject
+	Content io.ReadCloser
+}
+
+// ByteStore stores and streams attachment content.
+type ByteStore interface {
 	UploadAttachment(context.Context, AttachmentUpload) (database.CloudFileReferenceObject, error)
+	OpenAttachment(context.Context, string) (AttachmentReader, error)
+	DeleteAttachment(context.Context, string) error
 	Close() error
 }
 
@@ -121,6 +131,96 @@ func (c *Client) UploadAttachment(ctx context.Context, upload AttachmentUpload) 
 		MimeType:       upload.MimeType,
 		Size:           upload.Size,
 	}, nil
+}
+
+func (c *Client) OpenAttachment(ctx context.Context, fileID string) (AttachmentReader, error) {
+	if strings.TrimSpace(fileID) == "" {
+		return AttachmentReader{}, fmt.Errorf("attachment file ID is required")
+	}
+	file, err := c.client.GetFile(ctx, &gen.DyGetFileRequest{Id: fileID})
+	if err != nil {
+		return AttachmentReader{}, fmt.Errorf("get attachment metadata: %w", err)
+	}
+	if file.GetIsFolder() {
+		return AttachmentReader{}, fmt.Errorf("attachment file ID refers to a folder")
+	}
+	if file.GetId() == "" {
+		return AttachmentReader{}, fmt.Errorf("filesystem returned an attachment without an ID")
+	}
+	streamCtx, cancel := context.WithCancel(ctx)
+	stream, err := c.client.DownloadFile(streamCtx, &gen.DyDownloadFileRequest{Id: file.GetId()})
+	if err != nil {
+		cancel()
+		return AttachmentReader{}, fmt.Errorf("start attachment download: %w", err)
+	}
+	return AttachmentReader{
+		File:    cloudFileReference(file),
+		Content: &downloadReader{stream: stream, cancel: cancel},
+	}, nil
+}
+
+func (c *Client) DeleteAttachment(ctx context.Context, fileID string) error {
+	if strings.TrimSpace(fileID) == "" {
+		return fmt.Errorf("attachment file ID is required")
+	}
+	if _, err := c.client.DeleteFile(ctx, &gen.DyDeleteFileRequest{Id: fileID, Purge: true}); err != nil {
+		return fmt.Errorf("delete attachment: %w", err)
+	}
+	return nil
+}
+
+type downloadReader struct {
+	stream gen.DyFileService_DownloadFileClient
+	cancel context.CancelFunc
+	buffer []byte
+	closed bool
+}
+
+func (r *downloadReader) Read(p []byte) (int, error) {
+	if r.closed {
+		return 0, io.ErrClosedPipe
+	}
+	for len(r.buffer) == 0 {
+		chunk, err := r.stream.Recv()
+		if err != nil {
+			return 0, err
+		}
+		r.buffer = chunk.GetData()
+	}
+	count := copy(p, r.buffer)
+	r.buffer = r.buffer[count:]
+	return count, nil
+}
+
+func (r *downloadReader) Close() error {
+	if r.closed {
+		return nil
+	}
+	r.closed = true
+	r.cancel()
+	return nil
+}
+
+func cloudFileReference(file *gen.DyCloudFile) database.CloudFileReferenceObject {
+	reference := database.CloudFileReferenceObject{
+		ID:              file.GetId(),
+		Name:            file.GetName(),
+		MimeType:        file.GetMimeType(),
+		Hash:            file.GetHash(),
+		Size:            file.GetSize(),
+		URL:             file.GetUrl(),
+		Usage:           file.GetUsage(),
+		ApplicationType: file.GetApplicationType(),
+		FileMeta:        map[string]any{},
+		UserMeta:        map[string]any{},
+		SensitiveMarks:  []int{},
+	}
+	_ = json.Unmarshal(file.GetFileMeta(), &reference.FileMeta)
+	_ = json.Unmarshal(file.GetUserMeta(), &reference.UserMeta)
+	if reference.MimeType == "" {
+		reference.MimeType = file.GetContentType()
+	}
+	return reference
 }
 
 func (c *Client) Close() error { return c.conn.Close() }

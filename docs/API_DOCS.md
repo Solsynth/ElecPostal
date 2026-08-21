@@ -249,17 +249,18 @@ the original in the mailbox:
 Forwarded messages are sent from the alias and use a `Fwd:` subject to prevent
 simple forwarding loops. List rules with `GET /api/mailboxes/{mailbox-id}/forwarding`
 and remove one with `DELETE /api/mailboxes/{mailbox-id}/forwarding/{rule-id}`.
-Attachments are retained in the original mailbox but are not forwarded until a
-relay attachment byte-source is configured.
+Attachments are forwarded using their persisted DysonFS references. A missing
+or unreadable DysonFS source is reported as a failed best-effort forward; the
+message is never silently reduced to body-only content.
 
 ### Mailbox email quota
 
 `GET /api/mailboxes/{mailbox-id}/quota`
 
 Returns the workspace's shared storage usage. Valve periodically aggregates the
-raw email bytes reported by ElecPostal with bytes reported by other storage
-services, including DysonFS. Attachment bytes are excluded because DysonFS
-reports them separately.
+ElecPostal metadata/manifest bytes with bytes reported by other storage
+services, including DysonFS. Attachment bytes are owned by DysonFS and are not
+duplicated in ElecPostal's database quota.
 
 ```json
 {

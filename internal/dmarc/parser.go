@@ -67,6 +67,22 @@ func Parse(raw []byte) ([]Report, error) {
 	return reports, nil
 }
 
+// ParseAttachment parses one decoded DMARC report attachment without requiring
+// an enclosing RFC 5322 message.
+func ParseAttachment(name string, reader io.Reader) ([]Report, error) {
+	if reader == nil {
+		return nil, errors.New("DMARC attachment reader is required")
+	}
+	data, err := io.ReadAll(io.LimitReader(reader, maxReportBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read report attachment: %w", err)
+	}
+	if int64(len(data)) > maxReportBytes {
+		return nil, fmt.Errorf("report attachment exceeds %d bytes", maxReportBytes)
+	}
+	return parseAttachment(data, filepath.Base(name))
+}
+
 func parseEntity(header mail.Header, body io.Reader) ([]Report, error) {
 	mediaType, params, err := mime.ParseMediaType(header.Get("Content-Type"))
 	if err != nil {

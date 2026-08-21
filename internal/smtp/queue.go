@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -15,10 +16,54 @@ import (
 
 	"src.solsynth.dev/sosys/elecpostal/internal/config"
 	"src.solsynth.dev/sosys/elecpostal/internal/logging"
+	"src.solsynth.dev/sosys/elecpostal/internal/mailmime"
 	"src.solsynth.dev/sosys/elecpostal/internal/service"
 )
 
 type deliveryJob struct {
+	ID                   string                                   `json:"id"`
+	MessageID            string                                   `json:"message_id"`
+	FromAddress          string                                   `json:"from_address"`
+	FromName             string                                   `json:"from_name"`
+	Subject              string                                   `json:"subject"`
+	Body                 string                                   `json:"body"`
+	ContentType          string                                   `json:"content_type"`
+	To                   []service.RecipientInput                 `json:"to"`
+	Cc                   []service.RecipientInput                 `json:"cc"`
+	Recipients           []recipient                              `json:"recipients"`
+	AttachmentReferences map[string][]service.AttachmentReference `json:"attachment_references,omitempty"`
+	Authentication       datatypes.JSON                           `json:"authentication,omitempty"`
+	EnvelopeFrom         string                                   `json:"envelope_from"`
+	ReceivedAt           time.Time                                `json:"received_at"`
+	TransientAttachments []service.IncomingAttachment             `json:"-"`
+}
+
+func newDeliveryJob(message parsedMessage, envelopeFrom string, recipients []recipient) deliveryJob {
+	job := deliveryJob{
+		ID: uuid.NewString(), MessageID: message.id, FromAddress: message.fromAddress,
+		FromName: message.fromName, Subject: message.subject, Body: message.body,
+		ContentType: message.contentType, To: message.to, Cc: message.cc,
+		Recipients: recipients, ReceivedAt: time.Now(), EnvelopeFrom: envelopeFrom,
+	}
+	for _, attachment := range message.attachments {
+		job.TransientAttachments = append(job.TransientAttachments, service.IncomingAttachment{
+			Filename: attachment.filename, MimeType: attachment.mimeType,
+			Size: int64(len(attachment.content)), ContentID: attachment.contentID,
+			Disposition: attachment.disposition, Content: bytes.NewReader(attachment.content),
+		})
+	}
+	return job
+}
+
+type legacyQueuedAttachment struct {
+	Filename    string `json:"filename"`
+	MimeType    string `json:"mime_type"`
+	ContentID   string `json:"content_id,omitempty"`
+	Disposition string `json:"disposition,omitempty"`
+	Content     []byte `json:"content"`
+}
+
+type legacyDeliveryJob struct {
 	ID             string                   `json:"id"`
 	MessageID      string                   `json:"message_id"`
 	FromAddress    string                   `json:"from_address"`
@@ -29,27 +74,52 @@ type deliveryJob struct {
 	To             []service.RecipientInput `json:"to"`
 	Cc             []service.RecipientInput `json:"cc"`
 	Recipients     []recipient              `json:"recipients"`
-	Attachments    []queuedAttachment       `json:"attachments"`
+	Attachments    []legacyQueuedAttachment `json:"attachments"`
 	Authentication datatypes.JSON           `json:"authentication,omitempty"`
 	RawSource      []byte                   `json:"raw_source"`
 	EnvelopeFrom   string                   `json:"envelope_from"`
 	ReceivedAt     time.Time                `json:"received_at"`
 }
 
-type queuedAttachment struct {
-	Filename    string `json:"filename"`
-	MimeType    string `json:"mime_type"`
-	ContentID   string `json:"content_id,omitempty"`
-	Disposition string `json:"disposition,omitempty"`
-	Content     []byte `json:"content"`
-}
-
-func newDeliveryJob(message parsedMessage, raw []byte, envelopeFrom string, recipients []recipient) deliveryJob {
-	job := deliveryJob{ID: uuid.NewString(), MessageID: message.id, FromAddress: message.fromAddress, FromName: message.fromName, Subject: message.subject, Body: message.body, ContentType: message.contentType, To: message.to, Cc: message.cc, Recipients: recipients, ReceivedAt: time.Now(), RawSource: raw, EnvelopeFrom: envelopeFrom}
-	for _, attachment := range message.attachments {
-		job.Attachments = append(job.Attachments, queuedAttachment{Filename: attachment.filename, MimeType: attachment.mimeType, ContentID: attachment.contentID, Disposition: attachment.disposition, Content: attachment.content})
+func decodeLegacyDeliveryJob(data []byte) (deliveryJob, bool, error) {
+	var legacy legacyDeliveryJob
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		return deliveryJob{}, false, err
 	}
-	return job
+	if len(legacy.RawSource) == 0 && len(legacy.Attachments) == 0 {
+		return deliveryJob{}, false, nil
+	}
+	job := deliveryJob{ID: legacy.ID, MessageID: legacy.MessageID, FromAddress: legacy.FromAddress, FromName: legacy.FromName, Subject: legacy.Subject, Body: legacy.Body, ContentType: legacy.ContentType, To: legacy.To, Cc: legacy.Cc, Recipients: legacy.Recipients, Authentication: legacy.Authentication, EnvelopeFrom: legacy.EnvelopeFrom, ReceivedAt: legacy.ReceivedAt}
+	if len(legacy.RawSource) > 0 {
+		envelopeRecipients := make([]mailmime.Recipient, 0, len(legacy.Recipients))
+		for _, recipient := range legacy.Recipients {
+			envelopeRecipients = append(envelopeRecipients, mailmime.Recipient{Address: recipient.Address, Kind: "to"})
+		}
+		parsed, err := mailmime.ParseMessage(legacy.RawSource, legacy.EnvelopeFrom, envelopeRecipients)
+		if err != nil {
+			return deliveryJob{}, false, err
+		}
+		job.FromAddress, job.FromName, job.Subject, job.Body, job.ContentType = parsed.FromAddress, parsed.FromName, parsed.Subject, parsed.Body, parsed.BodyType
+		job.To, job.Cc = nil, nil
+		for _, recipient := range parsed.To {
+			job.To = append(job.To, service.RecipientInput{Address: recipient.Address, Name: recipient.Name, Kind: recipient.Kind})
+		}
+		for _, recipient := range parsed.Cc {
+			job.Cc = append(job.Cc, service.RecipientInput{Address: recipient.Address, Name: recipient.Name, Kind: recipient.Kind})
+		}
+		for _, attachment := range parsed.Attachments {
+			content, err := io.ReadAll(attachment.Content)
+			if err != nil {
+				return deliveryJob{}, false, err
+			}
+			job.TransientAttachments = append(job.TransientAttachments, service.IncomingAttachment{Filename: attachment.Filename, MimeType: attachment.MimeType, Size: attachment.Size, ContentID: attachment.ContentID, Disposition: attachment.Disposition, Content: bytes.NewReader(content)})
+		}
+	} else {
+		for _, attachment := range legacy.Attachments {
+			job.TransientAttachments = append(job.TransientAttachments, service.IncomingAttachment{Filename: attachment.Filename, MimeType: attachment.MimeType, Size: int64(len(attachment.Content)), ContentID: attachment.ContentID, Disposition: attachment.Disposition, Content: bytes.NewReader(attachment.Content)})
+		}
+	}
+	return job, true, nil
 }
 
 type inlineDelivery struct{ backend Backend }
@@ -119,16 +189,39 @@ func (q *NATSQueue) Start() error {
 	logging.Log.Info().Str("stream", q.cfg.Stream).Str("subject", q.cfg.Subject).Int("workers", q.cfg.Workers).Msg("SMTP NATS delivery queue started")
 	return nil
 }
-
 func (q *NATSQueue) Enqueue(ctx context.Context, job deliveryJob) error {
+	if len(job.TransientAttachments) > 0 {
+		stager, ok := q.backend.(attachmentStager)
+		if !ok {
+			return fmt.Errorf("attachment staging is not configured")
+		}
+		job.AttachmentReferences = map[string][]service.AttachmentReference{}
+		for _, recipient := range job.Recipients {
+			if recipient.MailboxID == "" {
+				continue
+			}
+			if _, exists := job.AttachmentReferences[recipient.MailboxID]; exists {
+				continue
+			}
+			references, err := stager.StageIncomingAttachments(ctx, recipient.MailboxID, job.TransientAttachments)
+			if err != nil {
+				deleteStagedAttachments(ctx, q.backend, job.AttachmentReferences)
+				return err
+			}
+			job.AttachmentReferences[recipient.MailboxID] = references
+		}
+		job.TransientAttachments = nil
+	}
 	payload, err := json.Marshal(job)
 	if err != nil {
+		deleteStagedAttachments(ctx, q.backend, job.AttachmentReferences)
 		return fmt.Errorf("encode SMTP delivery job: %w", err)
 	}
 	msg := nats.NewMsg(q.cfg.Subject)
 	msg.Data = payload
 	msg.Header.Set(nats.MsgIdHdr, job.ID)
 	if _, err := q.js.PublishMsg(msg, nats.Context(ctx)); err != nil {
+		deleteStagedAttachments(ctx, q.backend, job.AttachmentReferences)
 		return fmt.Errorf("persist SMTP delivery job: %w", err)
 	}
 	return nil
@@ -138,10 +231,19 @@ func (q *NATSQueue) handle(msg *nats.Msg) {
 	q.wg.Add(1)
 	defer q.wg.Done()
 	var job deliveryJob
+	legacy, isLegacy, legacyErr := decodeLegacyDeliveryJob(msg.Data)
 	if err := json.Unmarshal(msg.Data, &job); err != nil {
-		logging.Log.Error().Err(err).Msg("discarding malformed SMTP NATS job")
-		_ = msg.Term()
-		return
+		if legacyErr != nil || !isLegacy {
+			if legacyErr == nil {
+				legacyErr = err
+			}
+			logging.Log.Error().Err(legacyErr).Msg("discarding malformed SMTP NATS job")
+			_ = msg.Term()
+			return
+		}
+		job = legacy
+	} else if isLegacy {
+		job = legacy
 	}
 	if err := deliverJob(q.ctx, q.backend, job); err != nil {
 		logging.Log.Warn().Err(err).Str("smtp_message_id", job.MessageID).Msg("SMTP queued delivery failed; retrying")
@@ -164,27 +266,73 @@ func (q *NATSQueue) Close() error {
 	return nil
 }
 
+type attachmentStager interface {
+	StageIncomingAttachments(context.Context, string, []service.IncomingAttachment) ([]service.AttachmentReference, error)
+}
+
+func deleteStagedAttachments(ctx context.Context, backend Backend, refs map[string][]service.AttachmentReference) {
+	store, ok := backend.(interface {
+		DeleteAttachment(context.Context, string) error
+	})
+	if !ok {
+		return
+	}
+	seen := map[string]struct{}{}
+	for _, references := range refs {
+		for _, reference := range references {
+			id := strings.TrimSpace(reference.StorageKey)
+			if id == "" {
+				continue
+			}
+			if _, exists := seen[id]; exists {
+				continue
+			}
+			seen[id] = struct{}{}
+			_ = store.DeleteAttachment(ctx, id)
+		}
+	}
+}
+
 func deliverJob(ctx context.Context, backend Backend, job deliveryJob) error {
 	unique := map[string]struct{}{}
 	for _, recipient := range job.Recipients {
-		if _, seen := unique[recipient.mailboxID]; seen {
+		if recipient.MailboxID == "" {
 			continue
 		}
-		attachments := make([]service.IncomingAttachment, 0, len(job.Attachments))
-		for _, attachment := range job.Attachments {
-			attachments = append(attachments, service.IncomingAttachment{Filename: attachment.Filename, MimeType: attachment.MimeType, Size: int64(len(attachment.Content)), ContentID: attachment.ContentID, Disposition: attachment.Disposition, Content: bytes.NewReader(attachment.Content)})
+		if _, seen := unique[recipient.MailboxID]; seen {
+			continue
+		}
+		unique[recipient.MailboxID] = struct{}{}
+		references := job.AttachmentReferences[recipient.MailboxID]
+		transient := []service.IncomingAttachment(nil)
+		if len(references) == 0 && len(job.TransientAttachments) > 0 {
+			if stager, ok := backend.(attachmentStager); ok {
+				var err error
+				references, err = stager.StageIncomingAttachments(ctx, recipient.MailboxID, job.TransientAttachments)
+				if err != nil {
+					return err
+				}
+			} else {
+				transient = job.TransientAttachments
+			}
 		}
 		deliveredTo := make([]string, 0)
 		dmarcIntake := false
 		for _, candidate := range job.Recipients {
-			if candidate.mailboxID == recipient.mailboxID {
-				deliveredTo = append(deliveredTo, candidate.address)
-				if isDmarcRecipient(candidate.address) {
+			if candidate.MailboxID == recipient.MailboxID {
+				deliveredTo = append(deliveredTo, candidate.Address)
+				if isDmarcRecipient(candidate.Address) {
 					dmarcIntake = true
 				}
 			}
 		}
-		if _, err := backend.ReceiveEmail(ctx, service.ReceiveEmailInput{MailboxID: recipient.mailboxID, FromAddress: job.FromAddress, FromName: job.FromName, Subject: job.Subject, Body: job.Body, ContentType: job.ContentType, To: job.To, Cc: job.Cc, Attachments: attachments, SentAt: &job.ReceivedAt, Authentication: job.Authentication, RawSource: job.RawSource, EnvelopeFrom: job.EnvelopeFrom, DeliveredTo: deliveredTo, DmarcIntake: dmarcIntake}); err != nil {
+		if _, err := backend.ReceiveEmail(ctx, service.ReceiveEmailInput{
+			MailboxID: recipient.MailboxID, FromAddress: job.FromAddress, FromName: job.FromName,
+			Subject: job.Subject, Body: job.Body, ContentType: job.ContentType, To: job.To,
+			Cc: job.Cc, Attachments: transient, AttachmentReferences: references, SentAt: &job.ReceivedAt,
+			Authentication: job.Authentication, EnvelopeFrom: job.EnvelopeFrom,
+			DeliveredTo: deliveredTo, DmarcIntake: dmarcIntake,
+		}); err != nil {
 			return err
 		}
 	}

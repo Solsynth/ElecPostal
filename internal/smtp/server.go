@@ -25,6 +25,7 @@ import (
 
 	"src.solsynth.dev/sosys/elecpostal/internal/config"
 	"src.solsynth.dev/sosys/elecpostal/internal/database"
+	"src.solsynth.dev/sosys/elecpostal/internal/mailmime"
 	"src.solsynth.dev/sosys/elecpostal/internal/mailtext"
 	"src.solsynth.dev/sosys/elecpostal/internal/relay"
 	"src.solsynth.dev/sosys/elecpostal/internal/service"
@@ -87,6 +88,7 @@ func New(cfg config.ListenerConfig, domain string, backend Backend) (*Server, er
 func (s *Server) newLibraryServer() *gosmtp.Server {
 	server := gosmtp.NewServer(s)
 	server.Domain = s.domain
+	server.EnableDSN = true
 	server.MaxMessageBytes = s.maxMessageBytes()
 	server.MaxRecipients = s.maxRecipients()
 	server.ReadTimeout, server.WriteTimeout = 5*time.Minute, 5*time.Minute
@@ -127,7 +129,18 @@ func (s *Server) Addr() net.Addr {
 	}
 	return s.ln.Addr()
 }
-func (s *Server) Close() error { _ = s.server.Close(); s.wg.Wait(); return nil }
+func (s *Server) Close() error {
+	s.mu.Lock()
+	ln := s.ln
+	s.ln = nil
+	s.mu.Unlock()
+	if ln != nil {
+		_ = ln.Close()
+	}
+	_ = s.server.Close()
+	s.wg.Wait()
+	return nil
+}
 func (s *Server) maxRecipients() int {
 	if s.cfg.MaxRecipients > 0 {
 		return s.cfg.MaxRecipients
@@ -153,7 +166,10 @@ type smtpSession struct {
 	from          string
 	recipients    []recipient
 }
-type recipient struct{ address, mailboxID string }
+type recipient struct {
+	Address   string `json:"address"`
+	MailboxID string `json:"mailbox_id"`
+}
 
 func (ss *smtpSession) Reset()                   { ss.from, ss.recipients = "", nil }
 func (ss *smtpSession) Logout() error            { return nil }
@@ -194,7 +210,7 @@ func (ss *smtpSession) Rcpt(to string, _ *gosmtp.RcptOptions) error {
 	address := strings.ToLower(strings.TrimSpace(to))
 	box, err := ss.server.service.ResolveLocalMailbox(context.Background(), address)
 	if err == nil {
-		ss.recipients = append(ss.recipients, recipient{address: address, mailboxID: box.ID})
+		ss.recipients = append(ss.recipients, recipient{Address: address, MailboxID: box.ID})
 		return nil
 	}
 	if !errors.Is(err, service.ErrNotFound) {
@@ -205,7 +221,7 @@ func (ss *smtpSession) Rcpt(to string, _ *gosmtp.RcptOptions) error {
 	if ss.principal == nil || ss.principal.MailboxID == "" {
 		return &gosmtp.SMTPError{Code: 550, EnhancedCode: gosmtp.EnhancedCode{5, 1, 1}, Message: "User unknown"}
 	}
-	ss.recipients = append(ss.recipients, recipient{address: address, mailboxID: ""})
+	ss.recipients = append(ss.recipients, recipient{Address: address, MailboxID: ""})
 	return nil
 }
 func (ss *smtpSession) Data(r io.Reader) error {
@@ -224,7 +240,7 @@ func (ss *smtpSession) Data(r io.Reader) error {
 		ss.Reset()
 		return nil
 	}
-	if err := ss.server.delivery.Enqueue(context.Background(), newDeliveryJob(message, raw, ss.from, ss.recipients)); err != nil {
+	if err := ss.server.delivery.Enqueue(context.Background(), newDeliveryJob(message, ss.from, ss.recipients)); err != nil {
 		return err
 	}
 	ss.Reset()
@@ -244,11 +260,11 @@ func (ss *smtpSession) submit(message parsedMessage, raw []byte) error {
 	external.FromAddress, external.FromName = message.fromAddress, message.fromName
 	external.Subject, external.Body, external.ContentType = message.subject, message.body, message.contentType
 	for _, r := range ss.recipients {
-		if r.mailboxID != "" {
+		if r.MailboxID != "" {
 			local = append(local, r)
 			continue
 		}
-		address := r.address
+		address := r.Address
 		switch classifyRecipient(address, message.to, message.cc) {
 		case "cc":
 			external.Cc = append(external.Cc, address)
@@ -259,14 +275,46 @@ func (ss *smtpSession) submit(message parsedMessage, raw []byte) error {
 		}
 	}
 	if len(local) > 0 {
-		if err := deliverJob(context.Background(), ss.server.service, newDeliveryJob(message, raw, ss.from, local)); err != nil {
+		if err := deliverJob(context.Background(), ss.server.service, newDeliveryJob(message, ss.from, local)); err != nil {
 			return err
 		}
 	}
 	if len(external.To)+len(external.Cc)+len(external.Bcc) == 0 {
 		return nil
 	}
+	stagedReferences := []service.AttachmentReference(nil)
+	if len(message.attachments) > 0 {
+		stager, ok := ss.server.service.(interface {
+			StageIncomingAttachments(context.Context, string, []service.IncomingAttachment) ([]service.AttachmentReference, error)
+		})
+		if !ok {
+			return submissionError(relay.ErrAttachmentSourceRequired)
+		}
+		incoming := make([]service.IncomingAttachment, 0, len(message.attachments))
+		for _, attachment := range message.attachments {
+			incoming = append(incoming, service.IncomingAttachment{
+				Filename: attachment.filename, MimeType: attachment.mimeType,
+				Size: int64(len(attachment.content)), ContentID: attachment.contentID,
+				Disposition: attachment.disposition, Content: bytes.NewReader(attachment.content),
+			})
+		}
+		var err error
+		stagedReferences, err = stager.StageIncomingAttachments(context.Background(), ss.principal.MailboxID, incoming)
+		if err != nil {
+			return submissionError(err)
+		}
+		for _, reference := range stagedReferences {
+			external.AttachmentIDs = append(external.AttachmentIDs, reference.StorageKey)
+		}
+	}
 	if err := ss.server.service.SendOutbound(context.Background(), external); err != nil {
+		if deleter, ok := ss.server.service.(interface{ DeleteAttachment(context.Context, string) error }); ok {
+			for _, reference := range stagedReferences {
+				if reference.StorageKey != "" {
+					_ = deleter.DeleteAttachment(context.Background(), reference.StorageKey)
+				}
+			}
+		}
 		return submissionError(err)
 	}
 	return nil
@@ -346,33 +394,37 @@ type storedAttachment struct {
 }
 
 func parseMessage(raw []byte, envelopeFrom string, envelopeRecipients []recipient) (parsedMessage, error) {
-	m, err := mail.ReadMessage(bytes.NewReader(raw))
+	recipients := make([]mailmime.Recipient, 0, len(envelopeRecipients))
+	for _, recipient := range envelopeRecipients {
+		recipients = append(recipients, mailmime.Recipient{Address: recipient.Address, Kind: "to"})
+	}
+	parsed, err := mailmime.ParseMessage(raw, envelopeFrom, recipients)
 	if err != nil {
 		return parsedMessage{}, err
 	}
-	result := parsedMessage{id: strings.TrimSpace(m.Header.Get("Message-ID")), fromAddress: envelopeFrom, contentType: "text/plain"}
+	result := parsedMessage{
+		id: parsed.ID, fromAddress: parsed.FromAddress, fromName: parsed.FromName,
+		subject: parsed.Subject, body: parsed.Body, contentType: parsed.BodyType,
+	}
 	if result.id == "" {
 		result.id = "<" + uuid.NewString() + "@elecpostal>"
 	}
-	if from, err := m.Header.AddressList("From"); err == nil && len(from) > 0 {
-		result.fromAddress, result.fromName = strings.ToLower(from[0].Address), mailtext.DecodeHeader(from[0].Name)
+	for _, recipient := range parsed.To {
+		result.to = append(result.to, service.RecipientInput{Address: recipient.Address, Name: recipient.Name, Kind: recipient.Kind})
 	}
-	result.subject, result.to, result.cc = mailtext.DecodeHeader(m.Header.Get("Subject")), addresses(m.Header, "To", "to"), addresses(m.Header, "Cc", "cc")
-	if len(result.to) == 0 {
-		for _, r := range envelopeRecipients {
-			result.to = append(result.to, service.RecipientInput{Address: r.address, Kind: "to"})
+	for _, recipient := range parsed.Cc {
+		result.cc = append(result.cc, service.RecipientInput{Address: recipient.Address, Name: recipient.Name, Kind: recipient.Kind})
+	}
+	for _, attachment := range parsed.Attachments {
+		data, readErr := io.ReadAll(attachment.Content)
+		if readErr != nil {
+			return parsedMessage{}, readErr
 		}
+		result.attachments = append(result.attachments, storedAttachment{
+			filename: attachment.Filename, mimeType: attachment.MimeType,
+			contentID: attachment.ContentID, disposition: attachment.Disposition, content: data,
+		})
 	}
-	plain, html, attachments, err := parseEntity(m.Header, m.Body)
-	if err != nil {
-		return parsedMessage{}, err
-	}
-	if html != "" {
-		result.body, result.contentType = html, "text/html"
-	} else {
-		result.body = plain
-	}
-	result.attachments = attachments
 	return result, nil
 }
 func addresses(h mail.Header, key, kind string) []service.RecipientInput {

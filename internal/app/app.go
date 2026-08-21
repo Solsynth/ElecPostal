@@ -3,15 +3,14 @@ package app
 import (
 	"context"
 	"fmt"
-	"net"
-	"net/http"
-	"time"
-
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
+	"net"
+	"net/http"
+	"time"
 
 	"src.solsynth.dev/sosys/elecpostal/internal/config"
 	"src.solsynth.dev/sosys/elecpostal/internal/database"
@@ -64,6 +63,18 @@ func New(cfg *config.Config) (*App, error) {
 	}
 
 	emailSvc := service.NewEmailService(db, notifier)
+	var fileClient *filesystem.Client
+	if cfg.FileSystem.Target != "" {
+		fileClient, err = filesystem.NewClient(cfg.FileSystem.Target, cfg.FileSystem.UseTLS, cfg.FileSystem.TLSSkipVerify)
+		if err != nil {
+			return nil, err
+		}
+		emailSvc.SetAttachmentByteStore(fileClient)
+		logging.Log.Info().Str("target", cfg.FileSystem.Target).Msg("filesystem attachment byte store configured")
+	}
+	if err := emailSvc.MigrateLegacyProtocolSources(context.Background()); err != nil {
+		return nil, fmt.Errorf("migrate legacy protocol sources: %w", err)
+	}
 	if count, err := emailSvc.BackfillProtocolStorage(context.Background()); err != nil {
 		return nil, fmt.Errorf("backfill protocol mailbox storage: %w", err)
 	} else if count > 0 {
@@ -84,11 +95,10 @@ func New(cfg *config.Config) (*App, error) {
 	switch cfg.Mail.Relay.Adapter {
 	case "direct-smtp":
 		directRelay, err := relay.NewDirectSMTPAdapter(relay.DirectSMTPConfig{
-			Hostname:      cfg.Mail.Relay.Host,
-			InboundHost:   cfg.Mail.Relay.InboundHost,
-			RequireTLS:    cfg.Mail.Relay.TLSMode == "required",
-			TLSSkipVerify: cfg.Mail.Relay.TLSSkipVerify,
-			LocalDelivery: emailSvc.DeliverLocal,
+			Hostname: cfg.Mail.Relay.Host, InboundHost: cfg.Mail.Relay.InboundHost,
+			RequireTLS: cfg.Mail.Relay.TLSMode == "required", TLSSkipVerify: cfg.Mail.Relay.TLSSkipVerify,
+			AttachmentSource: appAttachmentSource{client: fileClient},
+			LocalDelivery:    emailSvc.DeliverLocal,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("configure direct SMTP relay: %w", err)
@@ -96,7 +106,7 @@ func New(cfg *config.Config) (*App, error) {
 		emailSvc.SetRelay(directRelay)
 		logging.Log.Info().Str("adapter", "direct-smtp").Str("inbound_host", cfg.Mail.Relay.InboundHost).Msg("outbound relay configured")
 	case "ses":
-		sesRelay, err := relay.NewSESAdapter(context.Background(), relay.SESConfig{Region: cfg.Mail.Relay.Region})
+		sesRelay, err := relay.NewSESAdapter(context.Background(), relay.SESConfig{Region: cfg.Mail.Relay.Region, AttachmentSource: appAttachmentSource{client: fileClient}})
 		if err != nil {
 			return nil, fmt.Errorf("configure SES relay: %w", err)
 		}
@@ -105,14 +115,6 @@ func New(cfg *config.Config) (*App, error) {
 		logging.Log.Info().Str("adapter", "ses").Str("region", cfg.Mail.Relay.Region).Str("inbound_host", cfg.Mail.Relay.InboundHost).Msg("outbound relay configured")
 	default:
 		logging.Log.Warn().Str("adapter", cfg.Mail.Relay.Adapter).Msg("outbound relay is not configured; sent emails will not be delivered")
-	}
-	if cfg.FileSystem.Target != "" {
-		fileClient, err := filesystem.NewClient(cfg.FileSystem.Target, cfg.FileSystem.UseTLS, cfg.FileSystem.TLSSkipVerify)
-		if err != nil {
-			return nil, err
-		}
-		emailSvc.SetAttachmentUploader(fileClient)
-		logging.Log.Info().Str("target", cfg.FileSystem.Target).Msg("filesystem attachment uploader configured")
 	}
 	if cfg.Workspace.Target != "" {
 		workspaceClient, err := workspace.NewClient(cfg.Workspace.Target, cfg.Workspace.UseTLS, cfg.Workspace.TLSSkipVerify)

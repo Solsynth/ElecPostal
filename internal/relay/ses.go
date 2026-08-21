@@ -14,11 +14,9 @@ import (
 	"src.solsynth.dev/sosys/elecpostal/internal/logging"
 )
 
-// SESConfig controls the AWS SES API v2 adapter. Authentication is supplied by
-// the AWS SDK default credential chain (environment, shared config, ECS, or an
-// EC2 role), not SMTP credentials.
 type SESConfig struct {
-	Region string
+	Region           string
+	AttachmentSource AttachmentSource
 }
 
 type sesClient interface {
@@ -31,8 +29,9 @@ type sesClient interface {
 
 // SESAdapter sends outbound mail with the AWS SES API v2.
 type SESAdapter struct {
-	client sesClient
-	region string
+	client           sesClient
+	region           string
+	attachmentSource AttachmentSource
 }
 
 func NewSESAdapter(ctx context.Context, cfg SESConfig) (*SESAdapter, error) {
@@ -43,13 +42,9 @@ func NewSESAdapter(ctx context.Context, cfg SESConfig) (*SESAdapter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load AWS configuration: %w", err)
 	}
-	return &SESAdapter{client: sesv2.NewFromConfig(awsCfg), region: cfg.Region}, nil
+	return &SESAdapter{client: sesv2.NewFromConfig(awsCfg), region: cfg.Region, attachmentSource: cfg.AttachmentSource}, nil
 }
-
 func (a *SESAdapter) Send(ctx context.Context, message Message) (DeliveryResult, error) {
-	if len(message.AttachmentIDs) > 0 {
-		return DeliveryResult{}, ErrAttachmentSourceRequired
-	}
 	recipients, err := envelopeRecipients(message)
 	if err != nil {
 		return DeliveryResult{}, err
@@ -62,15 +57,20 @@ func (a *SESAdapter) Send(ctx context.Context, message Message) (DeliveryResult,
 		return DeliveryResult{}, fmt.Errorf("invalid sender address %q", message.FromAddress)
 	}
 	from.Name = message.FromName
-
+	content := &types.EmailContent{Simple: sesMessage(message)}
+	if len(message.AttachmentIDs) > 0 {
+		raw, renderErr := renderMessage(ctx, message, a.attachmentSource)
+		if renderErr != nil {
+			return DeliveryResult{}, renderErr
+		}
+		content = &types.EmailContent{Raw: &types.RawMessage{Data: raw}}
+	}
 	output, err := a.client.SendEmail(ctx, &sesv2.SendEmailInput{
 		FromEmailAddress: aws.String(from.String()),
 		Destination: &types.Destination{
-			ToAddresses:  message.To,
-			CcAddresses:  message.Cc,
-			BccAddresses: message.Bcc,
+			ToAddresses: message.To, CcAddresses: message.Cc, BccAddresses: message.Bcc,
 		},
-		Content: &types.EmailContent{Simple: sesMessage(message)},
+		Content: content,
 	})
 	if err != nil {
 		return DeliveryResult{}, fmt.Errorf("send email with SES: %w", err)

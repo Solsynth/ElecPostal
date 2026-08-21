@@ -36,19 +36,19 @@ Key settings:
 ## Attachments
 
 Clients upload outgoing attachments to DysonFS first, then submit the returned
-file IDs as the `attachment_ids` string array to `POST /api/emails`. Inbound delivery
-services pass raw attachments to `EmailService.ReceiveEmail`; ElecPostal streams
-them to DysonFS under the destination mailbox's owner and workspace before it
-persists the email.
+file IDs as the `attachment_ids` string array to `POST /api/emails`. Inbound
+delivery and protocol APPEND stream decoded attachment bytes to DysonFS before
+ElecPostal persists message metadata. ElecPostal never stores attachment bytes
+in PostgreSQL or durable NATS jobs.
 
 ## Workspace email quota
 
-- Mailboxes belong to a workspace. ElecPostal reports raw email bytes as one
-  consumer of the workspace's shared storage quota. DysonFS reports attachment
-  bytes separately; Valve aggregates both services and periodically refreshes
-  the workspace usage snapshot. When the shared limit is exceeded, ElecPostal
-  archives the oldest messages and permanently removes their raw records after
-  30 days.
+- Mailboxes belong to a workspace. ElecPostal accounts for message text,
+  headers, recipients, and manifest metadata in its own quota. DysonFS owns
+  attachment bytes and reports that storage separately; Valve aggregates both
+  services and periodically refreshes the workspace usage snapshot. When the
+  shared limit is exceeded, ElecPostal archives the oldest messages and
+  permanently removes their metadata after 30 days.
 
 ## Outbound send limits
 
@@ -68,11 +68,13 @@ protocol listeners—not by HTTP APIs or another address on the same account.
 
 ## Protocol storage
 
-ElecPostal retains the canonical RFC 5322 source for received and sent mail,
-with per-address IMAP folders and stable POP3/IMAP UIDs. This pre-release
-service uses GORM `AutoMigrate` on startup. The provided `docker-compose.yml`
-starts PostgreSQL, JetStream, Redis, and ElecPostal. Configure TLS certificates
-for all enabled SMTP, IMAP, and POP3 listeners.
+ElecPostal stores protocol metadata and an attachment-free MIME manifest with
+each message. DysonFS is the only durable attachment-byte store. IMAP and POP3
+generate RFC 5322 responses on demand by streaming referenced DysonFS files;
+boundaries are generated per response. This pre-release service uses GORM
+`AutoMigrate` plus a startup migration for legacy raw sources. The provided
+`docker-compose.yml` starts PostgreSQL, JetStream, Redis, and ElecPostal.
+Configure TLS certificates for all enabled SMTP, IMAP, and POP3 listeners.
 
 ## JMAP
 

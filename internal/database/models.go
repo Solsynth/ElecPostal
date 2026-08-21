@@ -168,6 +168,7 @@ func (r *Recipient) BeforeCreate(tx *gorm.DB) error {
 type Attachment struct {
 	ID          string                    `gorm:"primaryKey;size:36" json:"id"`
 	EmailID     string                    `gorm:"index:idx_attachments_email_id;size:36" json:"email_id"`
+	Position    int                       `gorm:"index:idx_attachments_email_position" json:"position"`
 	Filename    string                    `gorm:"size:255" json:"filename"`
 	MimeType    string                    `gorm:"size:128" json:"mime_type"`
 	Size        int64                     `json:"size"`
@@ -220,16 +221,17 @@ type MailProtocolCredential struct {
 	UpdatedAt time.Time      `json:"updated_at"`
 }
 
-// MessageSource is the immutable RFC 5322 representation used by IMAP and
-// POP3.  Parsed Email fields remain an index/view for the HTTP API.
+// MessageSource is an attachment-free protocol manifest used by IMAP and
+// POP3. Attachment bytes remain in DysonFS and are streamed on demand.
 type MessageSource struct {
-	ID           string    `gorm:"primaryKey;size:36" json:"id"`
-	EmailID      string    `gorm:"uniqueIndex;size:36" json:"email_id"`
-	Raw          []byte    `gorm:"type:bytea;not null" json:"-"`
-	SHA256       string    `gorm:"size:64;not null" json:"sha256"`
-	EnvelopeFrom string    `gorm:"size:255" json:"envelope_from"`
-	ReceivedAt   time.Time `gorm:"not null" json:"received_at"`
-	CreatedAt    time.Time `json:"created_at"`
+	ID            string         `gorm:"primaryKey;size:36" json:"id"`
+	EmailID       string         `gorm:"uniqueIndex;size:36" json:"email_id"`
+	Manifest      datatypes.JSON `gorm:"type:jsonb;default:'{}';not null" json:"manifest"`
+	WireSizeBytes int64          `gorm:"not null;default:0" json:"wire_size_bytes"`
+	SHA256        string         `gorm:"size:64;not null" json:"sha256"`
+	EnvelopeFrom  string         `gorm:"size:255" json:"envelope_from"`
+	ReceivedAt    time.Time      `gorm:"not null" json:"received_at"`
+	CreatedAt     time.Time      `json:"created_at"`
 }
 
 func (s *MessageSource) BeforeCreate(tx *gorm.DB) error {

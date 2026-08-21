@@ -4,22 +4,31 @@ package pop3
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"fmt"
+	"io"
+	"mime"
+	"mime/multipart"
+	"mime/quotedprintable"
 	"net"
+	"net/mail"
 	"strconv"
 	"strings"
 	"sync"
 
 	"src.solsynth.dev/sosys/elecpostal/internal/config"
 	"src.solsynth.dev/sosys/elecpostal/internal/database"
+	"src.solsynth.dev/sosys/elecpostal/internal/mailmime"
 	"src.solsynth.dev/sosys/elecpostal/internal/service"
 )
 
 type Backend interface {
 	AuthenticateMailProtocolAddress(context.Context, string, string, string) (*service.ProtocolPrincipal, error)
 	ListProtocolFolder(context.Context, string, string) ([]service.ProtocolMessage, *database.MailFolder, error)
+	OpenProtocolMessage(context.Context, string) (mailmime.MessageSource, error)
 	MoveProtocolMessages(context.Context, string, string, string, []string) error
 }
 
@@ -170,11 +179,11 @@ func (s *Server) serve(raw net.Conn) {
 		}
 		switch cmd {
 		case "STAT":
-			count, size := 0, 0
+			count, size := 0, int64(0)
 			for i, m := range messages {
 				if !deleted[i] {
 					count++
-					size += len(m.Raw)
+					size += m.RFC822Size
 				}
 			}
 			reply(w, fmt.Sprintf("+OK %d %d", count, size))
@@ -182,7 +191,7 @@ func (s *Server) serve(raw net.Conn) {
 			lines := []string{"+OK scan listing follows"}
 			for i, m := range messages {
 				if !deleted[i] {
-					lines = append(lines, fmt.Sprintf("%d %d", i+1, len(m.Raw)))
+					lines = append(lines, fmt.Sprintf("%d %d", i+1, m.RFC822Size))
 				}
 			}
 			lines = append(lines, ".")
@@ -207,7 +216,16 @@ func (s *Server) serve(raw net.Conn) {
 				reply(w, "-ERR no such message")
 				continue
 			}
-			raw := messages[n-1].Raw
+			source, err := s.backend.OpenProtocolMessage(context.Background(), messages[n-1].EmailID)
+			if err != nil {
+				reply(w, "-ERR message source unavailable")
+				continue
+			}
+			raw, err := mailmime.RenderBytes(context.Background(), source)
+			if err != nil {
+				reply(w, "-ERR message source unavailable")
+				continue
+			}
 			if cmd == "TOP" && len(parts) > 1 {
 				raw = top(raw, parts[1])
 			}
@@ -259,11 +277,62 @@ func dotStuff(raw []byte) []string {
 }
 func top(raw []byte, lines string) []byte {
 	n, _ := strconv.Atoi(lines)
-	split := strings.Split(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\n")
-	end := 0
-	for end < len(split) && split[end] != "" {
-		end++
+	if n < 0 {
+		n = 0
 	}
-	end = min(len(split), end+1+n)
-	return []byte(strings.Join(split[:end], "\r\n"))
+	message, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		return raw
+	}
+	body := topText(message.Header, message.Body)
+	bodyLines := strings.Split(strings.ReplaceAll(string(body), "\r\n", "\n"), "\n")
+	if len(bodyLines) > n {
+		bodyLines = bodyLines[:n]
+	}
+	var output bytes.Buffer
+	for key, values := range message.Header {
+		for _, value := range values {
+			fmt.Fprintf(&output, "%s: %s\r\n", key, value)
+		}
+	}
+	output.WriteString("\r\n")
+	output.WriteString(strings.Join(bodyLines, "\r\n"))
+	return output.Bytes()
+}
+
+func topText(header mail.Header, body io.Reader) []byte {
+	mediaType, params, err := mime.ParseMediaType(header.Get("Content-Type"))
+	if err == nil && strings.HasPrefix(strings.ToLower(mediaType), "multipart/") {
+		reader := multipart.NewReader(body, params["boundary"])
+		for {
+			part, nextErr := reader.NextPart()
+			if nextErr != nil {
+				break
+			}
+			disposition, _, _ := mime.ParseMediaType(part.Header.Get("Content-Disposition"))
+			if strings.EqualFold(disposition, "attachment") || (part.Header.Get("Content-ID") != "" && !strings.HasPrefix(strings.ToLower(part.Header.Get("Content-Type")), "text/")) {
+				_, _ = io.Copy(io.Discard, part)
+				_ = part.Close()
+				continue
+			}
+			text := topText(mail.Header(part.Header), part)
+			_ = part.Close()
+			if len(text) > 0 {
+				return text
+			}
+		}
+		return nil
+	}
+	if !strings.HasPrefix(strings.ToLower(mediaType), "text/") {
+		return nil
+	}
+	var reader io.Reader = body
+	switch strings.ToLower(strings.TrimSpace(header.Get("Content-Transfer-Encoding"))) {
+	case "base64":
+		reader = base64.NewDecoder(base64.StdEncoding, body)
+	case "quoted-printable":
+		reader = quotedprintable.NewReader(body)
+	}
+	data, _ := io.ReadAll(reader)
+	return data
 }

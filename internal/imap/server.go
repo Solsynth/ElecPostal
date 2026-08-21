@@ -7,6 +7,8 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net"
 	"net/mail"
 	"strings"
@@ -21,6 +23,7 @@ import (
 
 	"src.solsynth.dev/sosys/elecpostal/internal/config"
 	"src.solsynth.dev/sosys/elecpostal/internal/database"
+	"src.solsynth.dev/sosys/elecpostal/internal/mailmime"
 	"src.solsynth.dev/sosys/elecpostal/internal/service"
 )
 
@@ -28,6 +31,7 @@ type Backend interface {
 	AuthenticateMailProtocolAddress(context.Context, string, string, string) (*service.ProtocolPrincipal, error)
 	ListProtocolFolder(context.Context, string, string) ([]service.ProtocolMessage, *database.MailFolder, error)
 	ListProtocolFolders(context.Context, string) ([]database.MailFolder, error)
+	OpenProtocolMessage(context.Context, string) (mailmime.MessageSource, error)
 	AppendProtocolMessage(context.Context, string, string, []byte, []string, time.Time) (uint32, uint64, error)
 	MoveProtocolMessages(context.Context, string, string, string, []string) error
 	CopyProtocolMessages(context.Context, string, string, string, []string) error
@@ -178,23 +182,31 @@ func (m *imapMailbox) ListMessages(uid bool, set *goimap.SeqSet, items []goimap.
 		if !set.Contains(n) {
 			continue
 		}
-		// NewMessage records the client's requested items and their ordering.
-		// Without it, go-imap formats FETCH responses as an empty list even
-		// though the mailbox correctly reports EXISTS, which makes clients show
-		// an apparently empty inbox.
+		source, err := m.user.backend.OpenProtocolMessage(context.Background(), x.EmailID)
+		if err != nil {
+			return err
+		}
+		raw, err := mailmime.RenderBytes(context.Background(), source)
+		if err != nil {
+			return err
+		}
 		msg := goimap.NewMessage(uint32(i+1), items)
 		msg.Uid = x.UID
 		msg.Flags = x.Flags
-		msg.Size = uint32(len(x.Raw))
+		msg.Size = uint32(x.RFC822Size)
 		msg.InternalDate = time.Now()
 		msg.Body = map[*goimap.BodySectionName]goimap.Literal{}
-		if err := populateFetchMetadata(msg, x.Raw, items); err != nil {
+		if err := populateFetchMetadata(msg, raw, items); err != nil {
 			return err
 		}
 		for _, item := range items {
-			for _, item = range item.Expand() {
-				if section, err := goimap.ParseBodySectionName(item); err == nil {
-					msg.Body[section] = literal{Reader: bytes.NewReader(x.Raw), n: len(x.Raw)}
+			for _, expanded := range item.Expand() {
+				if section, err := goimap.ParseBodySectionName(expanded); err == nil {
+					data, err := sectionData(raw, section)
+					if err != nil {
+						return err
+					}
+					msg.Body[section] = literal{Reader: bytes.NewReader(data), n: len(data)}
 				}
 			}
 		}
@@ -233,6 +245,106 @@ func populateFetchMetadata(msg *goimap.Message, raw []byte, items []goimap.Fetch
 		msg.BodyStructure, err = backendutil.FetchBodyStructure(header, parsed.Body, true)
 	}
 	return err
+}
+
+func sectionData(raw []byte, section *goimap.BodySectionName) ([]byte, error) {
+	if section == nil {
+		return append([]byte(nil), raw...), nil
+	}
+	if len(section.Path) == 0 {
+		switch section.Specifier {
+		case goimap.HeaderSpecifier:
+			if index := bytes.Index(raw, []byte("\r\n\r\n")); index >= 0 {
+				return append([]byte(nil), raw[:index+4]...), nil
+			}
+			return append([]byte(nil), raw...), nil
+		case goimap.TextSpecifier:
+			if index := bytes.Index(raw, []byte("\r\n\r\n")); index >= 0 {
+				return append([]byte(nil), raw[index+4:]...), nil
+			}
+			return nil, nil
+		default:
+			return append([]byte(nil), raw...), nil
+		}
+	}
+	part, header, body, err := selectPart(raw, section.Path)
+	if err != nil {
+		return nil, err
+	}
+	switch section.Specifier {
+	case goimap.HeaderSpecifier:
+		return header, nil
+	case goimap.MIMESpecifier:
+		return append(header, []byte("\r\n")...), nil
+	case goimap.TextSpecifier:
+		return body, nil
+	default:
+		return part, nil
+	}
+}
+
+func selectPart(raw []byte, path []int) (part, header, body []byte, err error) {
+	message, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	mediaType, params, err := mime.ParseMediaType(message.Header.Get("Content-Type"))
+	if err != nil || !strings.HasPrefix(strings.ToLower(mediaType), "multipart/") {
+		if len(path) > 0 {
+			return nil, nil, nil, fmt.Errorf("MIME part path is not multipart")
+		}
+		return raw, headerBytes(message.Header), readAll(message.Body), nil
+	}
+	reader := multipart.NewReader(message.Body, params["boundary"])
+	index := path[0]
+	if index <= 0 {
+		return nil, nil, nil, fmt.Errorf("MIME part index must be positive")
+	}
+	for current := 1; current <= index; current++ {
+		next, nextErr := reader.NextPart()
+		if nextErr != nil {
+			return nil, nil, nil, nextErr
+		}
+		if current != index {
+			_, _ = io.Copy(io.Discard, next)
+			_ = next.Close()
+			continue
+		}
+		var b bytes.Buffer
+		writeHeaderMap(&b, next.Header)
+		b.WriteString("\r\n")
+		bodyBytes, readErr := io.ReadAll(next)
+		_ = next.Close()
+		if readErr != nil {
+			return nil, nil, nil, readErr
+		}
+		b.Write(bodyBytes)
+		if len(path) == 1 {
+			return b.Bytes(), headerBytes(next.Header), bodyBytes, nil
+		}
+		return selectPart(b.Bytes(), path[1:])
+	}
+	return nil, nil, nil, io.ErrUnexpectedEOF
+}
+
+func headerBytes(header map[string][]string) []byte {
+	var b bytes.Buffer
+	writeHeaderMap(&b, header)
+	b.WriteString("\r\n")
+	return b.Bytes()
+}
+
+func writeHeaderMap(dst io.Writer, header map[string][]string) {
+	for key, values := range header {
+		for _, value := range values {
+			fmt.Fprintf(dst, "%s: %s\r\n", key, value)
+		}
+	}
+}
+
+func readAll(reader io.Reader) []byte {
+	data, _ := io.ReadAll(reader)
+	return data
 }
 
 func messageHeader(source mail.Header) messageproto.Header {
@@ -371,20 +483,20 @@ func matchesCriteria(m service.ProtocolMessage, c *goimap.SearchCriteria) bool {
 			return false
 		}
 	}
-	raw := strings.ToLower(string(m.Raw))
+	raw := strings.ToLower(m.Subject + "\r\n" + m.Body)
 	for _, v := range c.Text {
 		if !strings.Contains(raw, strings.ToLower(v)) {
 			return false
 		}
 	}
 	for _, v := range c.Body {
-		if !strings.Contains(raw, strings.ToLower(v)) {
+		if !strings.Contains(strings.ToLower(m.Body), strings.ToLower(v)) {
 			return false
 		}
 	}
 	for k, values := range c.Header {
 		for _, v := range values {
-			if !strings.Contains(raw, strings.ToLower(k+": "+v)) {
+			if strings.EqualFold(k, "subject") && !strings.Contains(strings.ToLower(m.Subject), strings.ToLower(v)) {
 				return false
 			}
 		}

@@ -300,9 +300,10 @@ func (h *Handler) emailSet(c *gin.Context, owner uuid.UUID, accountID string, ar
 }
 
 type mailRow struct {
-	Email  database.Email
-	Folder database.MailFolder
-	Flags  []string
+	Email    database.Email
+	Folder   database.MailFolder
+	Flags    []string
+	WireSize int64
 }
 
 func (h *Handler) rows(c *gin.Context, accountID string) ([]mailRow, error) {
@@ -326,7 +327,11 @@ func (h *Handler) rows(c *gin.Context, accountID string) ([]mailRow, error) {
 		if err := h.mail.DB().WithContext(c.Request.Context()).Preload("Recipients").Preload("Attachments").First(&email, "id = ?", email.ID).Error; err != nil {
 			return nil, err
 		}
-		out = append(out, mailRow{Email: email, Folder: database.MailFolder{ID: v.FolderID, Name: v.FolderName, SpecialUse: v.SpecialUse}, Flags: flags})
+		var source database.MessageSource
+		if err := h.mail.DB().WithContext(c.Request.Context()).Where("email_id = ?", email.ID).First(&source).Error; err != nil {
+			return nil, err
+		}
+		out = append(out, mailRow{Email: email, Folder: database.MailFolder{ID: v.FolderID, Name: v.FolderName, SpecialUse: v.SpecialUse}, Flags: flags, WireSize: source.WireSizeBytes})
 	}
 	return out, nil
 }
@@ -407,7 +412,7 @@ func emailObject(r mailRow) gin.H {
 	if r.Email.SentAt != nil {
 		sentAt = *r.Email.SentAt
 	}
-	return gin.H{"id": r.Email.ID, "blobId": r.Email.ID, "threadId": threadID(r.Email), "mailboxIds": gin.H{r.Folder.ID: true}, "keywords": keywords, "size": r.Email.RawSizeBytes, "receivedAt": r.Email.CreatedAt.Format(time.RFC3339), "sentAt": sentAt.Format(time.RFC3339), "from": []any{gin.H{"email": r.Email.FromAddress, "name": r.Email.FromName}}, "to": recipients("to"), "cc": recipients("cc"), "bcc": recipients("bcc"), "subject": r.Email.Subject, "preview": preview, "hasAttachment": len(r.Email.Attachments) > 0}
+	return gin.H{"id": r.Email.ID, "blobId": r.Email.ID, "threadId": threadID(r.Email), "mailboxIds": gin.H{r.Folder.ID: true}, "keywords": keywords, "size": r.WireSize, "receivedAt": r.Email.CreatedAt.Format(time.RFC3339), "sentAt": sentAt.Format(time.RFC3339), "from": []any{gin.H{"email": r.Email.FromAddress, "name": r.Email.FromName}}, "to": recipients("to"), "cc": recipients("cc"), "bcc": recipients("bcc"), "subject": r.Email.Subject, "preview": preview, "hasAttachment": len(r.Email.Attachments) > 0}
 }
 func threadID(e database.Email) string {
 	if e.ThreadID != nil {

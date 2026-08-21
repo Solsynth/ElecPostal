@@ -15,10 +15,11 @@ import (
 // DirectSMTPConfig controls direct-to-MX delivery. STARTTLS is attempted when
 // advertised by the receiving server; RequireTLS makes that mandatory.
 type DirectSMTPConfig struct {
-	Hostname      string
-	InboundHost   string
-	RequireTLS    bool
-	TLSSkipVerify bool
+	Hostname         string
+	InboundHost      string
+	RequireTLS       bool
+	TLSSkipVerify    bool
+	AttachmentSource AttachmentSource
 	// LocalDelivery receives messages whose destination domain publishes this
 	// server's Hostname as an MX record. It avoids an SMTP round trip back into
 	// the same service.
@@ -46,9 +47,6 @@ func NewDirectSMTPAdapter(cfg DirectSMTPConfig) (*DirectSMTPAdapter, error) {
 }
 
 func (a *DirectSMTPAdapter) Send(ctx context.Context, message Message) (DeliveryResult, error) {
-	if len(message.AttachmentIDs) > 0 {
-		return DeliveryResult{}, ErrAttachmentSourceRequired
-	}
 	from, err := mail.ParseAddress(message.FromAddress)
 	if err != nil || from.Address == "" {
 		return DeliveryResult{}, fmt.Errorf("invalid sender address %q", message.FromAddress)
@@ -62,7 +60,10 @@ func (a *DirectSMTPAdapter) Send(ctx context.Context, message Message) (Delivery
 		parts := strings.Split(recipient, "@")
 		byDomain[strings.ToLower(parts[len(parts)-1])] = append(byDomain[strings.ToLower(parts[len(parts)-1])], recipient)
 	}
-	data := formatMessage(message)
+	data, err := messageSourceOrNilWithContext(ctx, message, a.cfg.AttachmentSource)
+	if err != nil {
+		return DeliveryResult{}, err
+	}
 	for domain, domainRecipients := range byDomain {
 		if err := a.deliverDomain(ctx, from.Address, domain, domainRecipients, data, message); err != nil {
 			return DeliveryResult{}, fmt.Errorf("deliver to %s: %w", domain, err)

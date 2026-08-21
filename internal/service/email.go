@@ -53,7 +53,7 @@ type RecipientInput struct {
 	Kind    string `json:"kind"` // to, cc, bcc
 }
 
-// AttachmentInput is an attachment for a new email.
+// AttachmentInput is an attachment reference for a new email.
 type AttachmentInput struct {
 	Filename    string                             `json:"filename" binding:"required"`
 	MimeType    string                             `json:"mime_type"`
@@ -62,6 +62,19 @@ type AttachmentInput struct {
 	File        *database.CloudFileReferenceObject `json:"file,omitempty"`
 	ContentID   string                             `json:"content_id,omitempty"`
 	Disposition string                             `json:"disposition,omitempty"`
+	Position    int                                `json:"position"`
+}
+
+// AttachmentReference identifies an already-uploaded DysonFS object.
+type AttachmentReference struct {
+	Filename    string
+	MimeType    string
+	Size        int64
+	StorageKey  string
+	File        *database.CloudFileReferenceObject
+	ContentID   string
+	Disposition string
+	Position    int
 }
 
 // SendEmailInput is the payload for sending an email.
@@ -96,29 +109,22 @@ type IncomingAttachment struct {
 // MailboxID identifies the local destination; ownership is never supplied by
 // the caller and is always resolved from that mailbox.
 type ReceiveEmailInput struct {
-	MailboxID      string
-	ThreadID       string
-	FromAddress    string
-	FromName       string
-	Subject        string
-	Body           string
-	ContentType    string
-	To             []RecipientInput
-	Cc             []RecipientInput
-	Attachments    []IncomingAttachment
-	SentAt         *time.Time
-	Authentication datatypes.JSON
-	// RawSource is the unmodified RFC 5322 payload used by IMAP/POP3.  Trusted
-	// callers that do not have a source may omit it; a canonical source is then
-	// synthesized from the indexed fields.
-	RawSource    []byte
-	EnvelopeFrom string
-	// DeliveredTo contains envelope recipients for this mailbox. It drives alias
-	// forwarding even when the alias was BCC'd and absent from message headers.
-	DeliveredTo []string
-	// DmarcIntake keeps reports out of normal mailbox folders while retaining
-	// the original email and attachments for administrative review.
-	DmarcIntake bool
+	MailboxID            string
+	ThreadID             string
+	FromAddress          string
+	FromName             string
+	Subject              string
+	Body                 string
+	ContentType          string
+	To                   []RecipientInput
+	Cc                   []RecipientInput
+	Attachments          []IncomingAttachment
+	AttachmentReferences []AttachmentReference
+	SentAt               *time.Time
+	Authentication       datatypes.JSON
+	EnvelopeFrom         string
+	DeliveredTo          []string
+	DmarcIntake          bool
 }
 
 // ListInput is pagination for list endpoints.
@@ -242,7 +248,7 @@ type EmailService struct {
 	db                *database.DB
 	notifier          NotificationSender
 	realtime          realtime.Publisher
-	files             filesystem.Uploader
+	files             filesystem.ByteStore
 	relay             relay.Adapter
 	workspace         workspace.Provider
 	sharedQuotaClient gen.DyQuotaServiceClient
@@ -394,11 +400,10 @@ type NotificationSender interface {
 	Close() error
 }
 
-// SetAttachmentUploader enables streaming attachment uploads to FileSystem.
-// It is optional so deployments can continue accepting attachment IDs created
-// by another trusted service.
-func (s *EmailService) SetAttachmentUploader(uploader filesystem.Uploader) {
-	s.files = uploader
+// SetAttachmentByteStore enables streaming attachment uploads and downloads
+// through DysonFS.
+func (s *EmailService) SetAttachmentByteStore(store filesystem.ByteStore) {
+	s.files = store
 }
 
 // SetWorkspaceProvider enables workspace membership checks and derives the
@@ -1374,6 +1379,10 @@ func (s *EmailService) SendEmail(ctx context.Context, accountID uuid.UUID, input
 	if err != nil {
 		return nil, err
 	}
+	attachmentReferences, err := s.resolveAttachmentReferences(ctx, mailbox, input.AttachmentIDs)
+	if err != nil {
+		return nil, err
+	}
 	var sendLimits workspace.SendLimits
 	if !input.IsDraft && input.ScheduledAt == nil {
 		sendLimits, err = s.workspaceSendLimits(ctx, mailbox.WorkspaceID)
@@ -1456,12 +1465,9 @@ func (s *EmailService) SendEmail(ctx context.Context, accountID uuid.UUID, input
 				return err
 			}
 		}
-		for _, attachmentID := range input.AttachmentIDs {
-			attachmentID = strings.TrimSpace(attachmentID)
-			if attachmentID == "" {
-				return fmt.Errorf("attachment_ids cannot contain empty values")
-			}
-			if err := tx.Create(&database.Attachment{EmailID: email.ID, StorageKey: &attachmentID}).Error; err != nil {
+		for _, reference := range attachmentReferences {
+			id := strings.TrimSpace(reference.StorageKey)
+			if err := tx.Create(&database.Attachment{EmailID: email.ID, Position: reference.Position, Filename: reference.Filename, MimeType: reference.MimeType, Size: reference.Size, StorageKey: &id, File: reference.File, ContentID: reference.ContentID, Disposition: reference.Disposition}).Error; err != nil {
 				return err
 			}
 		}
@@ -1484,7 +1490,9 @@ func (s *EmailService) SendEmail(ctx context.Context, accountID uuid.UUID, input
 	if input.IsDraft || email.ScheduledAt != nil {
 		return &email, nil
 	}
-	if err := s.deliverStoredEmail(ctx, &email, outgoingRelayMessage(mailbox, fromAddress, input)); err != nil {
+	message := outgoingRelayMessage(mailbox, fromAddress, input)
+	message.Attachments = relayAttachmentMetadata(attachmentReferences)
+	if err := s.deliverStoredEmail(ctx, &email, message); err != nil {
 		return nil, err
 	}
 
@@ -1658,6 +1666,14 @@ func outgoingRelayMessage(mailbox database.Mailbox, fromAddress string, input Se
 	return message
 }
 
+func relayAttachmentMetadata(references []AttachmentReference) []relay.AttachmentMetadata {
+	metadata := make([]relay.AttachmentMetadata, 0, len(references))
+	for _, reference := range references {
+		metadata = append(metadata, relay.AttachmentMetadata{ID: reference.StorageKey, Filename: reference.Filename, MimeType: reference.MimeType, Size: reference.Size, ContentID: reference.ContentID, Disposition: reference.Disposition})
+	}
+	return metadata
+}
+
 func relayMessageFromEmail(email database.Email) relay.Message {
 	message := relay.Message{
 		FromAddress: email.FromAddress,
@@ -1678,8 +1694,9 @@ func relayMessageFromEmail(email database.Email) relay.Message {
 		}
 	}
 	for _, attachment := range email.Attachments {
-		if attachment.StorageKey != nil {
-			message.AttachmentIDs = append(message.AttachmentIDs, *attachment.StorageKey)
+		if id := attachmentFileID(attachment); id != "" {
+			message.AttachmentIDs = append(message.AttachmentIDs, id)
+			message.Attachments = append(message.Attachments, relay.AttachmentMetadata{ID: id, Filename: attachment.Filename, MimeType: attachment.MimeType, Size: attachment.Size, ContentID: attachment.ContentID, Disposition: attachment.Disposition})
 		}
 	}
 	return message
@@ -1689,8 +1706,26 @@ func relayMessageFromEmail(email database.Email) relay.Message {
 // by the direct SMTP adapter. The adapter calls this only after DNS confirms
 // that the recipient domain's MX points at this server.
 func (s *EmailService) DeliverLocal(ctx context.Context, message relay.Message, recipients []string) error {
-	if len(message.AttachmentIDs) > 0 {
-		return relay.ErrAttachmentSourceRequired
+	attachmentReferences, err := s.resolveAttachmentReferences(ctx, database.Mailbox{}, message.AttachmentIDs)
+	if err != nil {
+		return err
+	}
+	if len(message.Attachments) > 0 {
+		metadata := make(map[string]relay.AttachmentMetadata, len(message.Attachments))
+		for _, item := range message.Attachments {
+			metadata[item.ID] = item
+		}
+		for index := range attachmentReferences {
+			item := metadata[attachmentReferences[index].StorageKey]
+			if item.Filename != "" {
+				attachmentReferences[index].Filename = item.Filename
+			}
+			if item.MimeType != "" {
+				attachmentReferences[index].MimeType = item.MimeType
+			}
+			attachmentReferences[index].ContentID = item.ContentID
+			attachmentReferences[index].Disposition = item.Disposition
+		}
 	}
 	now := time.Now()
 	delivered := make(map[string]struct{}, len(recipients))
@@ -1706,17 +1741,11 @@ func (s *EmailService) DeliverLocal(ctx context.Context, message relay.Message, 
 			return fmt.Errorf("local recipient %q: %w", recipient, err)
 		}
 		if _, err := s.ReceiveEmail(ctx, ReceiveEmailInput{
-			MailboxID:   mailbox.ID,
-			ThreadID:    message.ThreadID,
-			FromAddress: message.FromAddress,
-			FromName:    message.FromName,
-			Subject:     message.Subject,
-			Body:        message.Body,
-			ContentType: message.ContentType,
-			To:          localRecipientInputs(message.To, "to"),
-			Cc:          localRecipientInputs(message.Cc, "cc"),
-			SentAt:      &now,
-			DeliveredTo: []string{recipient},
+			MailboxID: mailbox.ID, ThreadID: message.ThreadID, FromAddress: message.FromAddress,
+			FromName: message.FromName, Subject: message.Subject, Body: message.Body,
+			ContentType: message.ContentType, To: localRecipientInputs(message.To, "to"),
+			Cc: localRecipientInputs(message.Cc, "cc"), AttachmentReferences: attachmentReferences,
+			SentAt: &now, DeliveredTo: []string{recipient},
 		}); err != nil {
 			return err
 		}
@@ -1815,26 +1844,31 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 			}
 		}
 	}
-	logging.Log.Info().
-		Str("mailbox_id", mailbox.ID).
-		Int("attachment_count", len(input.Attachments)).
-		Msg("receiving email")
+	logging.Log.Info().Str("mailbox_id", mailbox.ID).Int("attachment_count", len(input.Attachments)+len(input.AttachmentReferences)).Msg("receiving email")
 	mailboxLimit, err := s.workspaceMailboxLimit(ctx, mailbox.WorkspaceID)
 	if err != nil {
 		return nil, err
 	}
-
-	attachments := make([]AttachmentInput, 0, len(input.Attachments))
-	for _, attachment := range input.Attachments {
-		stored, err := s.storeIncomingAttachment(ctx, mailbox, attachment)
+	attachments := make([]AttachmentInput, 0, len(input.AttachmentReferences)+len(input.Attachments))
+	stagedReferences := make([]AttachmentReference, 0, len(input.Attachments))
+	for _, reference := range input.AttachmentReferences {
+		if strings.TrimSpace(reference.StorageKey) == "" && (reference.File == nil || strings.TrimSpace(reference.File.ID) == "") {
+			return nil, fmt.Errorf("attachment DysonFS file ID is required")
+		}
+		if reference.StorageKey == "" && reference.File != nil {
+			reference.StorageKey = reference.File.ID
+		}
+		attachments = append(attachments, attachmentInputFromReference(reference))
+	}
+	if len(input.Attachments) > 0 {
+		staged, err := s.StageIncomingAttachments(ctx, mailbox.ID, input.Attachments)
 		if err != nil {
-			logging.Log.Warn().Err(err).Str("mailbox_id", mailbox.ID).Msg("failed to store incoming email attachment")
 			return nil, err
 		}
-		stored.Filename = mailtext.ToValidUTF8(stored.Filename)
-		stored.MimeType = mailtext.ToValidUTF8(stored.MimeType)
-		stored.ContentID = mailtext.ToValidUTF8(stored.ContentID)
-		attachments = append(attachments, stored)
+		stagedReferences = staged
+		for _, reference := range staged {
+			attachments = append(attachments, attachmentInputFromReference(reference))
+		}
 	}
 
 	email := database.Email{
@@ -1882,12 +1916,12 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 				return err
 			}
 		}
-		for _, attachment := range attachments {
-			if err := tx.Create(&database.Attachment{EmailID: email.ID, Filename: attachment.Filename, MimeType: attachment.MimeType, Size: attachment.Size, StorageKey: attachment.StorageKey, File: attachment.File, ContentID: attachment.ContentID, Disposition: attachment.Disposition}).Error; err != nil {
+		for position, attachment := range attachments {
+			if err := tx.Create(&database.Attachment{EmailID: email.ID, Position: position, Filename: attachment.Filename, MimeType: attachment.MimeType, Size: attachment.Size, StorageKey: attachment.StorageKey, File: attachment.File, ContentID: attachment.ContentID, Disposition: attachment.Disposition}).Error; err != nil {
 				return err
 			}
 		}
-		if err := s.storeProtocolSourceTx(tx, &email, input.RawSource, input.EnvelopeFrom); err != nil {
+		if err := s.storeProtocolSourceTx(tx, &email, nil, input.EnvelopeFrom); err != nil {
 			return err
 		}
 		if isDmarcIntake {
@@ -1896,6 +1930,11 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 		return s.addInboxMembershipTx(tx, mailbox.ID, email.ID)
 	})
 	if err != nil {
+		for _, reference := range stagedReferences {
+			if id := strings.TrimSpace(reference.StorageKey); id != "" && s.files != nil {
+				_ = s.files.DeleteAttachment(context.Background(), id)
+			}
+		}
 		logging.Log.Error().Err(err).Str("mailbox_id", mailbox.ID).Msg("failed to persist incoming email")
 		return nil, err
 	}
@@ -1910,7 +1949,7 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 	}
 	s.publishMailEvent(ctx, email.AccountID.String(), "mail.created", &email)
 	if isDmarcIntake {
-		if err := s.persistDmarcReports(ctx, &email, input.RawSource); err != nil {
+		if err := s.persistDmarcReports(ctx, &email, nil); err != nil {
 			logging.Log.Warn().Err(err).Str("email_id", email.ID).Msg("failed to parse DMARC report")
 		}
 	}
@@ -1931,7 +1970,41 @@ func isDmarcAddress(address string) bool {
 }
 
 func (s *EmailService) persistDmarcReports(ctx context.Context, email *database.Email, raw []byte) error {
-	reports, parseErr := dmarc.Parse(raw)
+	var reports []dmarc.Report
+	var parseErr error
+	if len(raw) > 0 {
+		reports, parseErr = dmarc.Parse(raw)
+	} else if s.files == nil {
+		parseErr = fmt.Errorf("attachment byte store is not configured")
+	} else {
+		var attachments []database.Attachment
+		if err := s.db.WithContext(ctx).Where("email_id = ?", email.ID).Order("position ASC").Find(&attachments).Error; err != nil {
+			parseErr = err
+		} else {
+			for _, attachment := range attachments {
+				id := attachmentFileID(attachment)
+				if id == "" {
+					continue
+				}
+				reader, err := s.files.OpenAttachment(ctx, id)
+				if err != nil {
+					parseErr = err
+					break
+				}
+				partReports, reportErr := dmarc.ParseAttachment(attachment.Filename, reader.Content)
+				_ = reader.Content.Close()
+				if reportErr == nil {
+					reports = append(reports, partReports...)
+				} else if strings.HasSuffix(strings.ToLower(attachment.Filename), ".xml") || strings.HasSuffix(strings.ToLower(attachment.Filename), ".gz") || strings.HasSuffix(strings.ToLower(attachment.Filename), ".zip") {
+					parseErr = reportErr
+					break
+				}
+			}
+			if parseErr == nil && len(reports) == 0 {
+				parseErr = errors.New("no DMARC report attachment found")
+			}
+		}
+	}
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if parseErr != nil {
 			return tx.Create(&database.DmarcReport{
@@ -2012,9 +2085,24 @@ func (s *EmailService) forwardIncomingEmail(ctx context.Context, mailbox databas
 		logging.Log.Warn().Err(err).Str("email_id", email.ID).Msg("look up mail forwarding rules")
 		return
 	}
+	var attachmentIDs []string
+	var attachmentMetadata []relay.AttachmentMetadata
 	if hasAttachments {
-		logging.Log.Warn().Str("email_id", email.ID).Msg("skipped forwarding email with attachments; relay attachment source is unavailable")
-		return
+		var attachments []database.Attachment
+		if err := s.db.WithContext(ctx).Where("email_id = ?", email.ID).Order("position ASC").Find(&attachments).Error; err != nil {
+			logging.Log.Warn().Err(err).Str("email_id", email.ID).Msg("failed to load forwarding attachments")
+			return
+		}
+		for _, attachment := range attachments {
+			if id := attachmentFileID(attachment); id != "" {
+				attachmentIDs = append(attachmentIDs, id)
+				attachmentMetadata = append(attachmentMetadata, relay.AttachmentMetadata{ID: id, Filename: attachment.Filename, MimeType: attachment.MimeType, Size: attachment.Size, ContentID: attachment.ContentID, Disposition: attachment.Disposition})
+			}
+		}
+		if len(attachmentIDs) != len(attachments) {
+			logging.Log.Warn().Str("email_id", email.ID).Msg("failed to forward email with missing attachment source")
+			return
+		}
 	}
 	sent := map[string]struct{}{}
 	for _, rule := range rules {
@@ -2032,7 +2120,7 @@ func (s *EmailService) forwardIncomingEmail(ctx context.Context, mailbox databas
 		if name == "" {
 			name = mailbox.Name
 		}
-		message := relay.Message{FromAddress: alias.Address, FromName: name, To: []string{rule.Destination}, Subject: "Fwd: " + email.Subject, Body: forwardedBody(email), ContentType: "text/plain", ThreadID: dereferenceString(email.ThreadID)}
+		message := relay.Message{FromAddress: alias.Address, FromName: name, To: []string{rule.Destination}, Subject: "Fwd: " + email.Subject, Body: forwardedBody(email), ContentType: "text/plain", ThreadID: dereferenceString(email.ThreadID), AttachmentIDs: attachmentIDs, Attachments: attachmentMetadata}
 		if _, err := s.relay.Send(ctx, message); err != nil {
 			logging.Log.Warn().Err(err).Str("email_id", email.ID).Str("destination", rule.Destination).Msg("failed to forward email")
 		}
@@ -2059,6 +2147,84 @@ func (s *EmailService) storeIncomingAttachment(ctx context.Context, mailbox data
 		return AttachmentInput{}, err
 	}
 	return AttachmentInput{Filename: attachment.Filename, MimeType: attachment.MimeType, Size: attachment.Size, StorageKey: &file.ID, File: &file, ContentID: attachment.ContentID, Disposition: attachment.Disposition}, nil
+}
+
+// StageIncomingAttachments uploads transient attachment readers before message
+// persistence. The returned references contain no attachment bytes.
+func (s *EmailService) StageIncomingAttachments(ctx context.Context, mailboxID string, incoming []IncomingAttachment) ([]AttachmentReference, error) {
+	var mailbox database.Mailbox
+	if err := s.db.WithContext(ctx).Where("id = ?", mailboxID).First(&mailbox).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	staged := make([]AttachmentReference, 0, len(incoming))
+	cleanup := func() {
+		if s.files == nil {
+			return
+		}
+		for _, reference := range staged {
+			if id := strings.TrimSpace(reference.StorageKey); id != "" {
+				_ = s.files.DeleteAttachment(context.Background(), id)
+			}
+		}
+	}
+	for _, attachment := range incoming {
+		if attachment.Content == nil {
+			cleanup()
+			return nil, fmt.Errorf("attachment content is required")
+		}
+		stored, err := s.storeIncomingAttachment(ctx, mailbox, attachment)
+		if err != nil {
+			cleanup()
+			return nil, err
+		}
+		staged = append(staged, AttachmentReference{
+			Filename: stored.Filename, MimeType: stored.MimeType, Size: stored.Size,
+			StorageKey: dereferenceString(stored.StorageKey), File: stored.File,
+			ContentID: stored.ContentID, Disposition: stored.Disposition, Position: len(staged),
+		})
+	}
+	return staged, nil
+}
+
+func attachmentInputFromReference(reference AttachmentReference) AttachmentInput {
+	id := strings.TrimSpace(reference.StorageKey)
+	return AttachmentInput{
+		Filename: reference.Filename, MimeType: reference.MimeType, Size: reference.Size,
+		StorageKey: &id, File: reference.File, ContentID: reference.ContentID,
+		Disposition: reference.Disposition, Position: reference.Position,
+	}
+}
+
+func (s *EmailService) resolveAttachmentReferences(ctx context.Context, mailbox database.Mailbox, ids []string) ([]AttachmentReference, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	if s.files == nil {
+		return nil, fmt.Errorf("attachment byte store is not configured")
+	}
+	references := make([]AttachmentReference, 0, len(ids))
+	for position, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return nil, fmt.Errorf("attachment_ids cannot contain empty values")
+		}
+		reader, err := s.files.OpenAttachment(ctx, id)
+		if err != nil {
+			return nil, fmt.Errorf("resolve attachment %q: %w", id, err)
+		}
+		_ = reader.Content.Close()
+		if reader.File.ID == "" || reader.File.Name == "" || reader.File.MimeType == "" || reader.File.Size < 0 {
+			return nil, fmt.Errorf("attachment %q has invalid metadata", id)
+		}
+		references = append(references, AttachmentReference{
+			Filename: reader.File.Name, MimeType: reader.File.MimeType, Size: reader.File.Size,
+			StorageKey: reader.File.ID, File: &reader.File, Position: position,
+		})
+	}
+	return references, nil
 }
 
 // DeleteEmail moves a message to Trash. Permanent deletion remains reserved for
@@ -2225,17 +2391,27 @@ func (s *EmailService) isBlocked(ctx context.Context, mailbox database.Mailbox, 
 	return count > 0
 }
 
-// PurgeArchivedEmails permanently removes raw email records whose 30-day
-// archive retention window has elapsed. Attachment contents remain managed by
-// DysonFS and are intentionally not included in mailbox storage accounting.
+// PurgeArchivedEmails permanently removes message metadata whose 30-day
+// archive retention window has elapsed. Unreferenced DysonFS attachment files
+// are deleted only after database references are removed and rechecked.
 func (s *EmailService) PurgeArchivedEmails(ctx context.Context) (int64, error) {
 	var emails []database.Email
 	if err := s.db.WithContext(ctx).Where("archive_delete_at IS NOT NULL AND archive_delete_at <= ?", time.Now()).Find(&emails).Error; err != nil {
 		return 0, err
 	}
 	var purged int64
+	var purgedIDs []string
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		for _, email := range emails {
+			var attachments []database.Attachment
+			if err := tx.Where("email_id = ?", email.ID).Find(&attachments).Error; err != nil {
+				return err
+			}
+			for _, attachment := range attachments {
+				if id := attachmentFileID(attachment); id != "" {
+					purgedIDs = append(purgedIDs, id)
+				}
+			}
 			if err := tx.Where("email_id = ?", email.ID).Delete(&database.Recipient{}).Error; err != nil {
 				return err
 			}
@@ -2253,7 +2429,33 @@ func (s *EmailService) PurgeArchivedEmails(ctx context.Context) (int64, error) {
 		}
 		return nil
 	})
-	return purged, err
+	if err != nil {
+		return purged, err
+	}
+	seen := map[string]struct{}{}
+	for _, id := range purgedIDs {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		var references []database.Attachment
+		if queryErr := s.db.WithContext(ctx).Find(&references).Error; queryErr != nil {
+			logging.Log.Warn().Err(queryErr).Str("file_id", id).Msg("check shared attachment reference")
+			continue
+		}
+		count := int64(0)
+		for _, reference := range references {
+			if attachmentFileID(reference) == id {
+				count++
+			}
+		}
+		if count == 0 && s.files != nil {
+			if deleteErr := s.files.DeleteAttachment(ctx, id); deleteErr != nil {
+				logging.Log.Warn().Err(deleteErr).Str("file_id", id).Msg("failed to delete purged attachment")
+			}
+		}
+	}
+	return purged, nil
 }
 
 // PurgeExpiredSendUsage removes old daily and monthly counters. Keeping a
@@ -2417,9 +2619,6 @@ func outgoingRawSize(email database.Email, input SendEmailInput) int64 {
 }
 
 func incomingRawSize(email database.Email, input ReceiveEmailInput) int64 {
-	if len(input.RawSource) > 0 {
-		return int64(len(input.RawSource))
-	}
 	size := rawStringSize(email.Subject, email.Body, email.FromAddress, email.FromName)
 	for _, recipients := range [][]RecipientInput{input.To, input.Cc} {
 		for _, recipient := range recipients {
