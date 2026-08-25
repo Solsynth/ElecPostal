@@ -96,3 +96,41 @@ func TestRenderStreamsInlineAndRegularAttachments(t *testing.T) {
 		t.Fatalf("attachments found inline=%v pdf=%v", sawInline, sawPDF)
 	}
 }
+
+func TestRenderPreservesAbsentContentType(t *testing.T) {
+	parsed, err := ParseMessage([]byte("From: sender@example.test\r\nSubject: hello\r\n\r\nbody\r\n"), "sender@example.test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !parsed.OmitContentType || parsed.BodyType != "text/plain" {
+		t.Fatalf("parsed MIME metadata = omit=%v type=%q", parsed.OmitContentType, parsed.BodyType)
+	}
+	rendered, err := RenderBytes(context.Background(), MessageSource{
+		FromAddress: parsed.FromAddress,
+		Subject:     parsed.Subject,
+		Body:        parsed.Body,
+		BodyType:    parsed.BodyType,
+		Manifest: Manifest{
+			Version:         ManifestVersion,
+			BodyType:        parsed.BodyType,
+			OmitContentType: parsed.OmitContentType,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := mail.ReadMessage(bytes.NewReader(rendered))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := message.Header.Get("Content-Type"); got != "" {
+		t.Fatalf("Content-Type = %q, want omitted", got)
+	}
+	body, err := io.ReadAll(message.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "body\r\n" {
+		t.Fatalf("body = %q", body)
+	}
+}

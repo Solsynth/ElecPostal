@@ -116,6 +116,7 @@ type ReceiveEmailInput struct {
 	Subject              string
 	Body                 string
 	ContentType          string
+	OmitContentType      bool
 	To                   []RecipientInput
 	Cc                   []RecipientInput
 	Attachments          []IncomingAttachment
@@ -1872,17 +1873,18 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 	}
 
 	email := database.Email{
-		AccountID:      mailbox.AccountID,
-		MailboxID:      mailbox.ID,
-		Subject:        input.Subject,
-		Body:           input.Body,
-		FromAddress:    input.FromAddress,
-		FromName:       input.FromName,
-		SentAt:         input.SentAt,
-		Folder:         folderInbox,
-		ContentType:    normalizeContentType(input.ContentType),
-		IsDmarcIntake:  isDmarcIntake,
-		Authentication: input.Authentication,
+		AccountID:       mailbox.AccountID,
+		MailboxID:       mailbox.ID,
+		Subject:         input.Subject,
+		Body:            input.Body,
+		FromAddress:     input.FromAddress,
+		FromName:        input.FromName,
+		SentAt:          input.SentAt,
+		Folder:          folderInbox,
+		ContentType:     normalizeContentType(input.ContentType),
+		OmitContentType: input.OmitContentType,
+		IsDmarcIntake:   isDmarcIntake,
+		Authentication:  input.Authentication,
 	}
 	threadID := strings.TrimSpace(input.ThreadID)
 	if threadID == "" {

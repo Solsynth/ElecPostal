@@ -202,7 +202,7 @@ func (s *EmailService) migrateLegacySource(ctx context.Context, sourceID, emailI
 		references = append(references, staged[0])
 		stagedIDs = append(stagedIDs, staged[0].StorageKey)
 	}
-	manifest := mailmime.Manifest{Version: mailmime.ManifestVersion, BodyType: parsed.BodyType}
+	manifest := mailmime.Manifest{Version: mailmime.ManifestVersion, BodyType: parsed.BodyType, OmitContentType: parsed.OmitContentType}
 	attachments := make(map[string]mailmime.Part, len(references))
 	for _, reference := range references {
 		part := mailmime.Part{AttachmentID: reference.StorageKey, Filename: reference.Filename, MimeType: reference.MimeType, Size: reference.Size, ContentID: reference.ContentID, Disposition: reference.Disposition}
@@ -460,10 +460,10 @@ func (s *EmailService) StoreProtocolFlags(ctx context.Context, mailboxID, folder
 	return result, err
 }
 
-// AppendProtocolMessage stores a client-supplied RFC 5322 message directly
-// into a protocol folder, backing the IMAP APPEND command. The raw source is
-// preserved verbatim for IMAP/POP3 retrieval while parsed headers feed the HTTP
-// index. It returns the assigned UID and mod-sequence.
+// AppendProtocolMessage stores a client-supplied RFC 5322 message into a
+// protocol folder. Parsed headers and MIME parts feed the normalized HTTP and
+// protocol indexes; protocol retrieval renders the canonical normalized form.
+// It returns the assigned UID and mod-sequence.
 func (s *EmailService) AppendProtocolMessage(ctx context.Context, mailboxID, folderName string, raw []byte, flags []string, date time.Time) (uint32, uint64, error) {
 	if strings.TrimSpace(mailboxID) == "" {
 		return 0, 0, fmt.Errorf("mailbox_id is required")
@@ -505,8 +505,9 @@ func (s *EmailService) AppendProtocolMessage(ctx context.Context, mailboxID, fol
 		Subject: mailtext.ToValidUTF8(parsed.Subject), Body: mailtext.ToValidUTF8(parsed.Body),
 		FromAddress: mailtext.ToValidUTF8(parsed.FromAddress), FromName: mailtext.ToValidUTF8(parsed.FromName),
 		Folder: httpFolder, ContentType: mailtext.ToValidUTF8(parsed.BodyType),
-		IsDraft: httpFolder == folderDrafts || hasSystemFlag(flags, `\Draft`),
-		IsRead:  hasSystemFlag(flags, `\Seen`), SentAt: &date,
+		OmitContentType: parsed.OmitContentType,
+		IsDraft:         httpFolder == folderDrafts || hasSystemFlag(flags, `\Draft`),
+		IsRead:          hasSystemFlag(flags, `\Seen`), SentAt: &date,
 		RawSizeBytes:   rawStringSize(parsed.Subject, parsed.Body, parsed.FromAddress, parsed.FromName),
 		DeliveryStatus: "draft",
 	}
@@ -675,7 +676,7 @@ func (s *EmailService) storeProtocolSourceTx(tx *gorm.DB, email *database.Email,
 	if err := tx.Where("email_id = ?", email.ID).Order("position ASC").Find(&attachments).Error; err != nil {
 		return err
 	}
-	manifest := mailmime.Manifest{Version: mailmime.ManifestVersion, BodyType: normalizeContentType(email.ContentType)}
+	manifest := mailmime.Manifest{Version: mailmime.ManifestVersion, BodyType: normalizeContentType(email.ContentType), OmitContentType: email.OmitContentType}
 	attachmentParts := make(map[string]mailmime.Part, len(attachments))
 	for _, attachment := range attachments {
 		id := attachmentFileID(attachment)

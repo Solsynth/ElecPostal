@@ -308,7 +308,9 @@ func (ss *smtpSession) submit(message parsedMessage, raw []byte) error {
 		}
 	}
 	if err := ss.server.service.SendOutbound(context.Background(), external); err != nil {
-		if deleter, ok := ss.server.service.(interface{ DeleteAttachment(context.Context, string) error }); ok {
+		if deleter, ok := ss.server.service.(interface {
+			DeleteAttachment(context.Context, string) error
+		}); ok {
 			for _, reference := range stagedReferences {
 				if reference.StorageKey != "" {
 					_ = deleter.DeleteAttachment(context.Background(), reference.StorageKey)
@@ -385,6 +387,7 @@ func (l *singleConnListener) Addr() net.Addr { return l.addr }
 
 type parsedMessage struct {
 	id, fromAddress, fromName, subject, body, contentType string
+	omitContentType                                       bool
 	to, cc                                                []service.RecipientInput
 	attachments                                           []storedAttachment
 }
@@ -405,6 +408,7 @@ func parseMessage(raw []byte, envelopeFrom string, envelopeRecipients []recipien
 	result := parsedMessage{
 		id: parsed.ID, fromAddress: parsed.FromAddress, fromName: parsed.FromName,
 		subject: parsed.Subject, body: parsed.Body, contentType: parsed.BodyType,
+		omitContentType: parsed.OmitContentType,
 	}
 	if result.id == "" {
 		result.id = "<" + uuid.NewString() + "@elecpostal>"

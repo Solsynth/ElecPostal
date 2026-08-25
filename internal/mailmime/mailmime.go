@@ -20,9 +20,10 @@ const ManifestVersion = 1
 // Manifest is the durable, attachment-free description of a message's MIME
 // shape. Attachment bytes are addressed only by DysonFS file ID.
 type Manifest struct {
-	Version  int    `json:"version"`
-	BodyType string `json:"body_type"`
-	Parts    []Part `json:"parts"`
+	Version         int    `json:"version"`
+	BodyType        string `json:"body_type"`
+	OmitContentType bool   `json:"omit_content_type,omitempty"`
+	Parts           []Part `json:"parts"`
 }
 
 type Part struct {
@@ -89,9 +90,9 @@ func Render(ctx context.Context, source MessageSource, dst io.Writer) error {
 	bodyType := normalizeBodyType(source.BodyType, source.Manifest.BodyType)
 	switch {
 	case len(parts) == 0:
-		return writeBody(dst, bodyType, source.Body)
+		return writeBody(dst, bodyType, source.Body, source.Manifest.OmitContentType)
 	case len(regular) == 0:
-		return writeRelated(ctx, dst, bodyType, source.Body, inline, source)
+		return writeRelated(ctx, dst, bodyType, source.Body, inline, source, source.Manifest.OmitContentType)
 	default:
 		boundary := newBoundary()
 		if _, err := fmt.Fprintf(dst, "Content-Type: multipart/mixed; boundary=%q\r\n\r\n", boundary); err != nil {
@@ -102,10 +103,10 @@ func Render(ctx context.Context, source MessageSource, dst io.Writer) error {
 			return err
 		}
 		if len(inline) > 0 {
-			if err := writeRelatedPart(ctx, writer, bodyType, source.Body, inline, source); err != nil {
+			if err := writeRelatedPart(ctx, writer, bodyType, source.Body, inline, source, source.Manifest.OmitContentType); err != nil {
 				return err
 			}
-		} else if err := writeBodyPart(writer, bodyType, source.Body); err != nil {
+		} else if err := writeBodyPart(writer, bodyType, source.Body, source.Manifest.OmitContentType); err != nil {
 			return err
 		}
 		for _, part := range regular {
@@ -164,14 +165,20 @@ func writeHeaders(source MessageSource, dst io.Writer) error {
 	return nil
 }
 
-func writeBody(dst io.Writer, bodyType, body string) error {
+func writeBody(dst io.Writer, bodyType, body string, omitContentType bool) error {
+	if omitContentType {
+		_, err := fmt.Fprintf(dst, "\r\n%s", body)
+		return err
+	}
 	_, err := fmt.Fprintf(dst, "Content-Type: %s; charset=utf-8\r\n\r\n%s", bodyType, body)
 	return err
 }
 
-func writeBodyPart(writer *multipart.Writer, bodyType, body string) error {
+func writeBodyPart(writer *multipart.Writer, bodyType, body string, omitContentType bool) error {
 	header := textproto.MIMEHeader{}
-	header.Set("Content-Type", bodyType+"; charset=utf-8")
+	if !omitContentType {
+		header.Set("Content-Type", bodyType+"; charset=utf-8")
+	}
 	part, err := writer.CreatePart(header)
 	if err != nil {
 		return err
@@ -180,7 +187,7 @@ func writeBodyPart(writer *multipart.Writer, bodyType, body string) error {
 	return err
 }
 
-func writeRelated(ctx context.Context, dst io.Writer, bodyType, body string, inline []Part, source MessageSource) error {
+func writeRelated(ctx context.Context, dst io.Writer, bodyType, body string, inline []Part, source MessageSource, omitContentType bool) error {
 	boundary := newBoundary()
 	if _, err := fmt.Fprintf(dst, "Content-Type: multipart/related; boundary=%q\r\n\r\n", boundary); err != nil {
 		return err
@@ -189,7 +196,7 @@ func writeRelated(ctx context.Context, dst io.Writer, bodyType, body string, inl
 	if err := writer.SetBoundary(boundary); err != nil {
 		return err
 	}
-	if err := writeBodyPart(writer, bodyType, body); err != nil {
+	if err := writeBodyPart(writer, bodyType, body, omitContentType); err != nil {
 		return err
 	}
 	for _, part := range inline {
@@ -200,7 +207,7 @@ func writeRelated(ctx context.Context, dst io.Writer, bodyType, body string, inl
 	return writer.Close()
 }
 
-func writeRelatedPart(ctx context.Context, outer *multipart.Writer, bodyType, body string, inline []Part, source MessageSource) error {
+func writeRelatedPart(ctx context.Context, outer *multipart.Writer, bodyType, body string, inline []Part, source MessageSource, omitContentType bool) error {
 	header := textproto.MIMEHeader{}
 	boundary := newBoundary()
 	header.Set("Content-Type", fmt.Sprintf("multipart/related; boundary=%q", boundary))
@@ -212,7 +219,7 @@ func writeRelatedPart(ctx context.Context, outer *multipart.Writer, bodyType, bo
 	if err := writer.SetBoundary(boundary); err != nil {
 		return err
 	}
-	if err := writeBodyPart(writer, bodyType, body); err != nil {
+	if err := writeBodyPart(writer, bodyType, body, omitContentType); err != nil {
 		return err
 	}
 	for _, attachment := range inline {

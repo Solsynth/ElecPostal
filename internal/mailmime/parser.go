@@ -25,15 +25,16 @@ type IncomingAttachment struct {
 }
 
 type ParsedMessage struct {
-	ID          string
-	FromAddress string
-	FromName    string
-	Subject     string
-	Body        string
-	BodyType    string
-	To          []Recipient
-	Cc          []Recipient
-	Attachments []IncomingAttachment
+	ID              string
+	FromAddress     string
+	FromName        string
+	Subject         string
+	Body            string
+	BodyType        string
+	OmitContentType bool
+	To              []Recipient
+	Cc              []Recipient
+	Attachments     []IncomingAttachment
 }
 
 func ParseMessage(raw []byte, envelopeFrom string, envelopeRecipients []Recipient) (ParsedMessage, error) {
@@ -41,7 +42,10 @@ func ParseMessage(raw []byte, envelopeFrom string, envelopeRecipients []Recipien
 	if err != nil {
 		return ParsedMessage{}, err
 	}
-	result := ParsedMessage{ID: strings.TrimSpace(message.Header.Get("Message-ID")), FromAddress: envelopeFrom, BodyType: "text/plain"}
+	result := ParsedMessage{
+		ID: strings.TrimSpace(message.Header.Get("Message-ID")), FromAddress: envelopeFrom,
+		BodyType: "text/plain", OmitContentType: strings.TrimSpace(message.Header.Get("Content-Type")) == "",
+	}
 	if from, err := message.Header.AddressList("From"); err == nil && len(from) > 0 {
 		result.FromAddress = strings.ToLower(from[0].Address)
 		result.FromName = mailtext.DecodeHeader(from[0].Name)

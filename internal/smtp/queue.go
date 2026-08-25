@@ -28,6 +28,7 @@ type deliveryJob struct {
 	Subject              string                                   `json:"subject"`
 	Body                 string                                   `json:"body"`
 	ContentType          string                                   `json:"content_type"`
+	OmitContentType      bool                                     `json:"omit_content_type,omitempty"`
 	To                   []service.RecipientInput                 `json:"to"`
 	Cc                   []service.RecipientInput                 `json:"cc"`
 	Recipients           []recipient                              `json:"recipients"`
@@ -42,7 +43,8 @@ func newDeliveryJob(message parsedMessage, envelopeFrom string, recipients []rec
 	job := deliveryJob{
 		ID: uuid.NewString(), MessageID: message.id, FromAddress: message.fromAddress,
 		FromName: message.fromName, Subject: message.subject, Body: message.body,
-		ContentType: message.contentType, To: message.to, Cc: message.cc,
+		ContentType: message.contentType, OmitContentType: message.omitContentType,
+		To: message.to, Cc: message.cc,
 		Recipients: recipients, ReceivedAt: time.Now(), EnvelopeFrom: envelopeFrom,
 	}
 	for _, attachment := range message.attachments {
@@ -100,6 +102,7 @@ func decodeLegacyDeliveryJob(data []byte) (deliveryJob, bool, error) {
 			return deliveryJob{}, false, err
 		}
 		job.FromAddress, job.FromName, job.Subject, job.Body, job.ContentType = parsed.FromAddress, parsed.FromName, parsed.Subject, parsed.Body, parsed.BodyType
+		job.OmitContentType = parsed.OmitContentType
 		job.To, job.Cc = nil, nil
 		for _, recipient := range parsed.To {
 			job.To = append(job.To, service.RecipientInput{Address: recipient.Address, Name: recipient.Name, Kind: recipient.Kind})
@@ -328,7 +331,8 @@ func deliverJob(ctx context.Context, backend Backend, job deliveryJob) error {
 		}
 		if _, err := backend.ReceiveEmail(ctx, service.ReceiveEmailInput{
 			MailboxID: recipient.MailboxID, FromAddress: job.FromAddress, FromName: job.FromName,
-			Subject: job.Subject, Body: job.Body, ContentType: job.ContentType, To: job.To,
+			Subject: job.Subject, Body: job.Body, ContentType: job.ContentType,
+			OmitContentType: job.OmitContentType, To: job.To,
 			Cc: job.Cc, Attachments: transient, AttachmentReferences: references, SentAt: &job.ReceivedAt,
 			Authentication: job.Authentication, EnvelopeFrom: job.EnvelopeFrom,
 			DeliveredTo: deliveredTo, DmarcIntake: dmarcIntake,

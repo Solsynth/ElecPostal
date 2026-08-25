@@ -112,10 +112,11 @@ type Email struct {
 	IsDraft               bool           `gorm:"index:idx_emails_is_draft" json:"is_draft"`
 	Folder                string         `gorm:"index:idx_emails_folder;size:16" json:"folder"`
 	ContentType           string         `gorm:"size:32" json:"content_type"`
+	OmitContentType       bool           `gorm:"not null;default:false" json:"-"`
 	IsDmarcIntake         bool           `gorm:"index:idx_emails_is_dmarc_intake" json:"is_dmarc_intake"`
-	ScheduledAt           *time.Time     `gorm:"index" json:"scheduled_at,omitempty"`
-	TrashedAt             *time.Time     `gorm:"index" json:"trashed_at,omitempty"`
-	SpamAt                *time.Time     `gorm:"index" json:"spam_at,omitempty"`
+	ScheduledAt           *time.Time     `json:"scheduled_at,omitempty"`
+	TrashedAt             *time.Time     `json:"trashed_at,omitempty"`
+	SpamAt                *time.Time     `json:"spam_at,omitempty"`
 	SentAt                *time.Time     `json:"sent_at,omitempty"`
 	DeliveryStatus        string         `gorm:"index;size:32" json:"delivery_status"`
 	DeliveryAttempts      int            `json:"delivery_attempts"`
