@@ -266,6 +266,9 @@ func (s *EmailService) SetRelay(adapter relay.Adapter) {
 	s.relay = adapter
 }
 
+// HasRelay reports whether an outbound relay adapter is configured.
+func (s *EmailService) HasRelay() bool { return s.relay != nil }
+
 // SetIdentityManager enables provider identity provisioning. It is normally
 // the SES adapter configured as the outbound relay.
 func (s *EmailService) SetIdentityManager(manager relay.IdentityManager) {

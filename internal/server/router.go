@@ -27,8 +27,11 @@ func NewRouter(cfg *config.Config, emailSvc *service.EmailService) *gin.Engine {
 
 	// JMAP uses fixed discovery/API paths rather than the REST /api namespace.
 	jmapHandler := jmap.New(emailSvc)
+	r.GET("/.well-known/jmap", jmap.WellKnown)
 	r.GET("/jmap/session", jmapHandler.Session)
 	r.POST("/jmap/api", jmapHandler.API)
+	r.POST("/jmap/upload/:accountId", jmapHandler.Upload)
+	r.GET("/jmap/download/:accountId/:blobId/:name", jmapHandler.Download)
 
 	api := r.Group("/api")
 	handler.RegisterRoutes(api, emailSvc)
