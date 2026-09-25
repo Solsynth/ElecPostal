@@ -26,7 +26,7 @@ func TestEmailRoutesListPreviewAndDownloadSerializedEML(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&database.Email{}, &database.Mailbox{}, &database.Recipient{}, &database.Attachment{}, &database.EmailLabel{}, &database.EmailLabelMapping{}, &database.MessageSource{}); err != nil {
+	if err := db.AutoMigrate(&database.Email{}, &database.Mailbox{}, &database.MailboxAlias{}, &database.Recipient{}, &database.Attachment{}, &database.EmailLabel{}, &database.EmailLabelMapping{}, &database.MessageSource{}); err != nil {
 		t.Fatal(err)
 	}
 	accountID := uuid.New()
@@ -50,6 +50,12 @@ func TestEmailRoutesListPreviewAndDownloadSerializedEML(t *testing.T) {
 		c.Next()
 	})
 	RegisterRoutes(group, svc)
+	senderRequest := httptest.NewRequest(http.MethodGet, "/api/addresses/senders?q=sender", nil)
+	senderResponse := httptest.NewRecorder()
+	router.ServeHTTP(senderResponse, senderRequest)
+	if senderResponse.Code != http.StatusOK || !strings.Contains(senderResponse.Body.String(), "sender@example.test") {
+		t.Fatalf("sender suggestions = status %d, body %s", senderResponse.Code, senderResponse.Body.String())
+	}
 
 	listRequest := httptest.NewRequest(http.MethodGet, "/api/emails", nil)
 	listResponse := httptest.NewRecorder()

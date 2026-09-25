@@ -27,6 +27,41 @@ local-only mailbox addresses as full email addresses.
 
 When no domain is configured, `host` is an empty string.
 
+## Address autocomplete
+
+`GET /api/addresses/senders?q={text}&take=20` returns recent distinct senders
+from the authenticated account's received mail. `GET /api/addresses/contacts?q={text}&take=20`
+uses the same parameters to return distinct recipients from sent mail for the
+compose form's To, Cc, and Bcc fields. Matching is case-insensitive against
+address and display name; results are ordered by most recent interaction.
+`take` defaults to `20` and is capped at `50`.
+
+Each result includes `address`, `name`, `last_seen`, `interaction_count`,
+`avatar_url`, `avatar_source`, and `gravatar_url`. Mailbox aliases are treated
+as distinct addresses; `alias` identifies a configured local alias, while
+`workspace_id` is provided when the address belongs to a local mailbox/alias.
+Avatar priority is the SolarPass workspace picture for `@solarpass.one`
+addresses when available, then a published BIMI logo, then Gravatar. BIMI is
+discovered through `default._bimi.{domain}` TXT records and only HTTPS logo URLs
+are returned. `bimi_url` is included when present. The API returns image URLs;
+the client loads the image.
+
+Example response:
+
+```json
+[
+  {
+    "address": "sender@example.net",
+    "name": "Sender",
+    "last_seen": "2026-09-26T12:00:00Z",
+    "interaction_count": 4,
+    "avatar_url": "https://www.gravatar.com/avatar/...?...",
+    "avatar_source": "gravatar",
+    "gravatar_url": "https://www.gravatar.com/avatar/...?..."
+  }
+]
+```
+
 ## Mailboxes
 
 ### List mailboxes

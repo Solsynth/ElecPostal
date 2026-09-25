@@ -157,6 +157,18 @@ func (c *Client) SendLimits(ctx context.Context, workspaceID string) (SendLimits
 	}
 }
 
+// WorkspaceAvatar returns the workspace picture URL used for profile identity.
+func (c *Client) WorkspaceAvatar(ctx context.Context, workspaceID string) (string, error) {
+	workspace, err := c.getWorkspace(ctx, workspaceID)
+	if err != nil {
+		return "", err
+	}
+	if picture := workspace.GetPicture(); picture != nil {
+		return strings.TrimSpace(picture.GetUrl()), nil
+	}
+	return "", nil
+}
+
 func (c *Client) getWorkspace(ctx context.Context, workspaceID string) (*gen.DyWorkspace, error) {
 	workspace, err := c.client.GetWorkspace(ctx, &gen.DyGetWorkspaceRequest{Query: &gen.DyGetWorkspaceRequest_Id{Id: workspaceID}})
 	if err != nil {

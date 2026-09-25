@@ -32,6 +32,12 @@ func RegisterRoutes(r *gin.RouterGroup, emailSvc *service.EmailService) {
 		mailboxes.DELETE("/:id/forwarding/:forwardingID", func(c *gin.Context) { deleteMailForwarding(c, emailSvc) })
 	}
 
+	addresses := r.Group("/addresses")
+	{
+		addresses.GET("/senders", func(c *gin.Context) { listAddressSuggestions(c, emailSvc, true) })
+		addresses.GET("/contacts", func(c *gin.Context) { listAddressSuggestions(c, emailSvc, false) })
+	}
+
 	emails := r.Group("/emails")
 	{
 		emails.GET("", func(c *gin.Context) { listEmails(c, emailSvc) })
