@@ -97,6 +97,50 @@ func TestRenderStreamsInlineAndRegularAttachments(t *testing.T) {
 	}
 }
 
+func TestRenderRemovesLeadingContentTypeFromHTMLBody(t *testing.T) {
+	source := MessageSource{
+		Body:     "Content-Type: text/html; charset=utf-8\r\n\r\n<p>Hello</p>",
+		BodyType: "text/html",
+		Manifest: Manifest{Version: ManifestVersion, BodyType: "text/html"},
+	}
+	rendered, err := RenderBytes(context.Background(), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := mail.ReadMessage(bytes.NewReader(rendered))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(message.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "<p>Hello</p>" {
+		t.Fatalf("HTML body = %q, want %q", body, "<p>Hello</p>")
+	}
+}
+
+func TestRenderKeepsHTMLBodyThatStartsWithDifferentContentType(t *testing.T) {
+	body := "Content-Type: text/html; charset=windows-1252\r\n\r\n<p>Hello</p>"
+	rendered, err := RenderBytes(context.Background(), MessageSource{
+		Body: body, BodyType: "text/html",
+		Manifest: Manifest{Version: ManifestVersion, BodyType: "text/html"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := mail.ReadMessage(bytes.NewReader(rendered))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(message.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != body {
+		t.Fatalf("HTML body = %q, want %q", got, body)
+	}
+}
 func TestRenderPreservesAbsentContentType(t *testing.T) {
 	parsed, err := ParseMessage([]byte("From: sender@example.test\r\nSubject: hello\r\n\r\nbody\r\n"), "sender@example.test", nil)
 	if err != nil {

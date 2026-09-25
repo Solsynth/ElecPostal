@@ -19,6 +19,7 @@ import (
 	"src.solsynth.dev/sosys/elecpostal/internal/dmarc"
 	"src.solsynth.dev/sosys/elecpostal/internal/filesystem"
 	"src.solsynth.dev/sosys/elecpostal/internal/logging"
+	"src.solsynth.dev/sosys/elecpostal/internal/mailmime"
 	"src.solsynth.dev/sosys/elecpostal/internal/mailtext"
 	"src.solsynth.dev/sosys/elecpostal/internal/realtime"
 	"src.solsynth.dev/sosys/elecpostal/internal/relay"
@@ -158,14 +159,14 @@ type MailboxStats struct {
 
 // ThreadSummary is one conversation row suitable for a mailbox list.
 type ThreadSummary struct {
-	ID            string         `json:"id"`
-	MailboxID     string         `json:"mailbox_id"`
-	Subject       string         `json:"subject"`
-	LatestAt      time.Time      `json:"latest_at"`
-	MessageCount  int64          `json:"message_count"`
-	UnreadCount   int64          `json:"unread_count"`
-	Participants  []string       `json:"participants"`
-	LatestMessage database.Email `json:"latest_message"`
+	ID            string       `json:"id"`
+	MailboxID     string       `json:"mailbox_id"`
+	Subject       string       `json:"subject"`
+	LatestAt      time.Time    `json:"latest_at"`
+	MessageCount  int64        `json:"message_count"`
+	UnreadCount   int64        `json:"unread_count"`
+	Participants  []string     `json:"participants"`
+	LatestMessage EmailSummary `json:"latest_message"`
 }
 
 // CreateBlockRuleInput creates a sender or domain rule for a mailbox or workspace.
@@ -862,9 +863,9 @@ func (s *EmailService) authorizedMailbox(ctx context.Context, accountID uuid.UUI
 	return &mailbox, nil
 }
 
-// ListEmails returns emails for an account with optional mailbox and workspace
+// ListEmails returns email summaries for an account with optional mailbox and workspace
 // filters. Workspace filters require active membership in that workspace.
-func (s *EmailService) ListEmails(ctx context.Context, accountID uuid.UUID, mailboxID string, input ListInput) ([]database.Email, int64, error) {
+func (s *EmailService) ListEmails(ctx context.Context, accountID uuid.UUID, mailboxID string, input ListInput) ([]EmailSummary, int64, error) {
 	if input.Take <= 0 {
 		input.Take = 20
 	}
@@ -902,7 +903,11 @@ func (s *EmailService) ListEmails(ctx context.Context, accountID uuid.UUID, mail
 		Preload("Recipients").Preload("Attachments").Preload("Mailbox").Preload("Labels").Find(&items).Error; err != nil {
 		return nil, 0, err
 	}
-	return items, total, nil
+	summaries := make([]EmailSummary, len(items))
+	for i := range items {
+		summaries[i] = emailSummary(items[i])
+	}
+	return summaries, total, nil
 }
 
 // GetMailboxStats returns counts for an account's active messages. mailboxID
@@ -1162,6 +1167,22 @@ func (s *EmailService) GetEmail(ctx context.Context, accountID uuid.UUID, id str
 	return &email, nil
 }
 
+// OpenEmailEML returns a stream that serializes the account-owned message as RFC 5322 bytes.
+func (s *EmailService) OpenEmailEML(ctx context.Context, accountID uuid.UUID, emailID string) (io.ReadCloser, error) {
+	if _, err := s.GetEmail(ctx, accountID, emailID); err != nil {
+		return nil, err
+	}
+	source, err := s.OpenProtocolMessage(ctx, emailID)
+	if err != nil {
+		return nil, err
+	}
+	reader, writer := io.Pipe()
+	go func() {
+		writer.CloseWithError(mailmime.Render(ctx, source, writer))
+	}()
+	return reader, nil
+}
+
 // ListThreads returns one summary per conversation, newest activity first.
 func (s *EmailService) ListThreads(ctx context.Context, accountID uuid.UUID, mailboxID string, input ListInput) ([]ThreadSummary, int64, error) {
 	query := s.emailListQuery(ctx, accountID, input)
@@ -1181,7 +1202,7 @@ func (s *EmailService) ListThreads(ctx context.Context, accountID uuid.UUID, mai
 		}
 		group := groups[threadID]
 		if group == nil {
-			group = &ThreadSummary{ID: threadID, MailboxID: message.MailboxID, Subject: message.Subject, LatestAt: message.CreatedAt, LatestMessage: message}
+			group = &ThreadSummary{ID: threadID, MailboxID: message.MailboxID, Subject: message.Subject, LatestAt: message.CreatedAt, LatestMessage: emailSummary(message)}
 			groups[threadID] = group
 			ordered = append(ordered, threadID)
 		}
@@ -1210,11 +1231,13 @@ func (s *EmailService) ListThreads(ctx context.Context, accountID uuid.UUID, mai
 	}
 	items := make([]ThreadSummary, 0, end-start)
 	for _, id := range ordered[start:end] {
-		items = append(items, *groups[id])
+		group := *groups[id]
+		group.LatestMessage.Body = mailtext.Summary(group.LatestMessage.Body, group.LatestMessage.ContentType, 256)
+		items = append(items, group)
 	}
 	return items, total, nil
-}
 
+}
 func (s *EmailService) GetThread(ctx context.Context, accountID uuid.UUID, threadID string) ([]database.Email, error) {
 	var messages []database.Email
 	if err := s.db.WithContext(ctx).Where("account_id = ? AND thread_id = ?", accountID, threadID).Order("created_at ASC").Preload("Recipients").Preload("Attachments").Preload("Mailbox").Preload("Labels").Find(&messages).Error; err != nil {

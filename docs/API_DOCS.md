@@ -305,6 +305,11 @@ needed:
 | `to` | Case-insensitive match against a recipient name or address. |
 | `has_attachments` | `true` for messages with attachments, `false` for messages without. |
 
+List responses use `body` as a plain-text preview capped at 256 Unicode
+characters. HTML markup and embedded style/script content are omitted. The full
+message body remains available from `GET /api/emails/{email-id}`.
+
+
 For filter counts and navigation badges, use `GET /api/emails/stats` or
 `GET /api/mailboxes/{mailbox-id}/stats`. Both return a total, unread, starred,
 and draft count plus a count by delivery state.
@@ -315,6 +320,10 @@ and draft count plus a count by delivery state.
 
 Returns the email with its mailbox, recipients, and attachments.
 
+Download a freshly serialized RFC 5322 message with
+`GET /api/emails/{email-id}/eml`. The response is an `.eml` attachment with
+content type `message/rfc822`; headers, MIME structure, and attachment bytes
+are reconstructed from stored metadata and DysonFS, not saved original bytes.
 Inbound messages can include an `authentication` JSON object. Clients should
 show its `warnings` as a persistent sender-safety badge, including when the
 message is moved out of Spam. It is server-generated metadata and must not be

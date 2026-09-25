@@ -88,11 +88,12 @@ func Render(ctx context.Context, source MessageSource, dst io.Writer) error {
 	parts := orderedParts(source)
 	inline, regular := splitAttachments(parts)
 	bodyType := normalizeBodyType(source.BodyType, source.Manifest.BodyType)
+	body := stripLeadingContentType(source.Body, bodyType)
 	switch {
 	case len(parts) == 0:
-		return writeBody(dst, bodyType, source.Body, source.Manifest.OmitContentType)
+		return writeBody(dst, bodyType, body, source.Manifest.OmitContentType)
 	case len(regular) == 0:
-		return writeRelated(ctx, dst, bodyType, source.Body, inline, source, source.Manifest.OmitContentType)
+		return writeRelated(ctx, dst, bodyType, body, inline, source, source.Manifest.OmitContentType)
 	default:
 		boundary := newBoundary()
 		if _, err := fmt.Fprintf(dst, "Content-Type: multipart/mixed; boundary=%q\r\n\r\n", boundary); err != nil {
@@ -103,10 +104,10 @@ func Render(ctx context.Context, source MessageSource, dst io.Writer) error {
 			return err
 		}
 		if len(inline) > 0 {
-			if err := writeRelatedPart(ctx, writer, bodyType, source.Body, inline, source, source.Manifest.OmitContentType); err != nil {
+			if err := writeRelatedPart(ctx, writer, bodyType, body, inline, source, source.Manifest.OmitContentType); err != nil {
 				return err
 			}
-		} else if err := writeBodyPart(writer, bodyType, source.Body, source.Manifest.OmitContentType); err != nil {
+		} else if err := writeBodyPart(writer, bodyType, body, source.Manifest.OmitContentType); err != nil {
 			return err
 		}
 		for _, part := range regular {
@@ -321,6 +322,29 @@ func normalizeBodyType(bodyType, manifestType string) string {
 		return "text/plain"
 	}
 	return bodyType
+}
+
+func stripLeadingContentType(body, bodyType string) string {
+	lineEnd := strings.Index(body, "\n")
+	if lineEnd < 0 {
+		return body
+	}
+	headerLine := strings.TrimSuffix(body[:lineEnd], "\r")
+	if !strings.HasPrefix(strings.ToLower(headerLine), "content-type:") {
+		return body
+	}
+	mediaType, params, err := mime.ParseMediaType(strings.TrimSpace(headerLine[len("content-type:"):]))
+	if err != nil || !strings.EqualFold(mediaType, bodyType) || !strings.EqualFold(params["charset"], "utf-8") {
+		return body
+	}
+	separatorEnd := lineEnd + 1
+	if separatorEnd < len(body) && body[separatorEnd] == '\r' {
+		separatorEnd++
+	}
+	if separatorEnd >= len(body) || body[separatorEnd] != '\n' {
+		return body
+	}
+	return body[separatorEnd+1:]
 }
 
 func formatContentID(value string) string {

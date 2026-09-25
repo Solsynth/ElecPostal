@@ -19,6 +19,7 @@ import (
 
 	"src.solsynth.dev/sosys/elecpostal/internal/database"
 	"src.solsynth.dev/sosys/elecpostal/internal/mailmime"
+	"src.solsynth.dev/sosys/elecpostal/internal/mailtext"
 	"src.solsynth.dev/sosys/elecpostal/internal/service"
 )
 
@@ -781,7 +782,7 @@ func (h *Handler) searchSnippetGet(c *gin.Context, accountID string, args map[st
 		if err := h.mail.DB().WithContext(ctx).Where("id = ? AND archived_at IS NULL", id).First(&email).Error; err != nil {
 			continue
 		}
-		snippet := extractSnippet(email.Subject+" "+email.Body+" "+email.FromAddress, text, 300)
+		snippet := extractSnippet(email.Subject+" "+mailtext.Summary(email.Body, email.ContentType, 1200)+" "+email.FromAddress, text, 300)
 		results = append(results, snippetResult{EmailID: id, Snippet: snippet})
 	}
 
@@ -1107,10 +1108,7 @@ func emailObject(r mailRow) gin.H {
 		}
 		return out
 	}
-	preview := r.Email.Body
-	if len(preview) > 256 {
-		preview = preview[:256]
-	}
+	preview := mailtext.Summary(r.Email.Body, r.Email.ContentType, 256)
 	sentAt := r.Email.CreatedAt
 	if r.Email.SentAt != nil {
 		sentAt = *r.Email.SentAt
@@ -1147,11 +1145,11 @@ func emailObject(r mailRow) gin.H {
 		"mailboxIds": gin.H{r.Folder.ID: true}, "keywords": keywords,
 		"size": r.WireSize, "receivedAt": r.Email.CreatedAt.Format(time.RFC3339),
 		"sentAt": sentAt.Format(time.RFC3339),
-		"from": []any{gin.H{"email": r.Email.FromAddress, "name": r.Email.FromName}},
-		"to": recipients("to"), "cc": recipients("cc"), "bcc": recipients("bcc"),
+		"from":   []any{gin.H{"email": r.Email.FromAddress, "name": r.Email.FromName}},
+		"to":     recipients("to"), "cc": recipients("cc"), "bcc": recipients("bcc"),
 		"subject": r.Email.Subject, "preview": preview,
 		"hasAttachment": len(r.Email.Attachments) > 0,
-		"textBody": textBody, "htmlBody": []any{},
+		"textBody":      textBody, "htmlBody": []any{},
 		"attachments": attachments, "headers": headers,
 	}
 }

@@ -2,6 +2,7 @@ package handler
 
 import (
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -36,7 +37,7 @@ func RegisterRoutes(r *gin.RouterGroup, emailSvc *service.EmailService) {
 		emails.GET("", func(c *gin.Context) { listEmails(c, emailSvc) })
 		emails.GET("/stats", func(c *gin.Context) { getMailboxStats(c, emailSvc) })
 		emails.POST("", func(c *gin.Context) { sendEmail(c, emailSvc) })
-		emails.GET("/:id", func(c *gin.Context) { getEmail(c, emailSvc) })
+		emails.GET("/:id/eml", func(c *gin.Context) { downloadEmailEML(c, emailSvc) })
 		emails.POST("/:id/resend", func(c *gin.Context) { resendEmail(c, emailSvc) })
 		emails.DELETE("/:id", func(c *gin.Context) { deleteEmail(c, emailSvc) })
 		emails.POST("/:id/read", func(c *gin.Context) { markRead(c, emailSvc, true) })
@@ -457,6 +458,23 @@ func getEmail(c *gin.Context, emailSvc *service.EmailService) {
 		return
 	}
 	c.JSON(http.StatusOK, email)
+}
+
+func downloadEmailEML(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	data, err := emailSvc.OpenEmailEML(c.Request.Context(), uuid.MustParse(accountID), c.Param("id"))
+	if err != nil {
+		renderServiceError(c, err)
+		return
+	}
+	defer data.Close()
+	c.Header("Content-Type", "message/rfc822")
+	c.Header("Content-Disposition", "attachment; filename=\""+c.Param("id")+".eml\"")
+	c.Status(http.StatusOK)
+	_, _ = io.Copy(c.Writer, data)
 }
 
 func resendEmail(c *gin.Context, emailSvc *service.EmailService) {
