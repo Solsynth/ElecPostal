@@ -67,6 +67,26 @@ func TestEmailRoutesListPreviewAndDownloadSerializedEML(t *testing.T) {
 		t.Fatalf("list preview = %#v", listed)
 	}
 
+	// The original single-email API must stay available alongside the EML
+	// stream — the detail view fetches the full message by id.
+	singleRequest := httptest.NewRequest(http.MethodGet, "/api/emails/"+email.ID, nil)
+	singleResponse := httptest.NewRecorder()
+	router.ServeHTTP(singleResponse, singleRequest)
+	if singleResponse.Code != http.StatusOK {
+		t.Fatalf("single email status = %d, body %s", singleResponse.Code, singleResponse.Body.String())
+	}
+	var fetched struct {
+		ID      string `json:"id"`
+		Subject string `json:"subject"`
+		Body    string `json:"body"`
+	}
+	if err := json.Unmarshal(singleResponse.Body.Bytes(), &fetched); err != nil {
+		t.Fatal(err)
+	}
+	if fetched.ID != email.ID || fetched.Subject != "HTML mail" || fetched.Body != body {
+		t.Fatalf("single email = %#v", fetched)
+	}
+
 	emlRequest := httptest.NewRequest(http.MethodGet, "/api/emails/"+email.ID+"/eml", nil)
 	emlResponse := httptest.NewRecorder()
 	router.ServeHTTP(emlResponse, emlRequest)

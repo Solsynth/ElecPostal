@@ -36,6 +36,7 @@ func RegisterRoutes(r *gin.RouterGroup, emailSvc *service.EmailService) {
 	{
 		emails.GET("", func(c *gin.Context) { listEmails(c, emailSvc) })
 		emails.GET("/stats", func(c *gin.Context) { getMailboxStats(c, emailSvc) })
+		emails.GET("/:id", func(c *gin.Context) { getEmail(c, emailSvc) })
 		emails.POST("", func(c *gin.Context) { sendEmail(c, emailSvc) })
 		emails.GET("/:id/eml", func(c *gin.Context) { downloadEmailEML(c, emailSvc) })
 		emails.POST("/:id/resend", func(c *gin.Context) { resendEmail(c, emailSvc) })
