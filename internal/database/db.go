@@ -84,5 +84,10 @@ func (d *DB) AutoMigrate() error {
 	if err := d.Exec(`UPDATE emails SET thread_id = id WHERE thread_id IS NULL OR thread_id = ''`).Error; err != nil {
 		return err
 	}
+	// Per-mailbox Message-ID uniqueness backs batch import dedupe. NULL
+	// message_ids are excluded so mail without a Message-ID is never blocked.
+	if err := d.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_emails_mailbox_message_id ON emails (mailbox_id, message_id) WHERE message_id IS NOT NULL`).Error; err != nil {
+		return err
+	}
 	return nil
 }

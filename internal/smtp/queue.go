@@ -330,7 +330,7 @@ func deliverJob(ctx context.Context, backend Backend, job deliveryJob) error {
 			}
 		}
 		if _, err := backend.ReceiveEmail(ctx, service.ReceiveEmailInput{
-			MailboxID: recipient.MailboxID, FromAddress: job.FromAddress, FromName: job.FromName,
+			MailboxID: recipient.MailboxID, MessageID: job.MessageID, FromAddress: job.FromAddress, FromName: job.FromName,
 			Subject: job.Subject, Body: job.Body, ContentType: job.ContentType,
 			OmitContentType: job.OmitContentType, To: job.To,
 			Cc: job.Cc, Attachments: transient, AttachmentReferences: references, SentAt: &job.ReceivedAt,

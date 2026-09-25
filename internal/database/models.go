@@ -107,6 +107,9 @@ type Email struct {
 	Body                  string         `gorm:"type:text" json:"body"`
 	FromAddress           string         `gorm:"size:255" json:"from_address"`
 	FromName              string         `gorm:"size:128" json:"from_name"`
+	// MessageID is the RFC 5322 Message-ID header value when present. It is the
+	// per-mailbox import dedupe key; NULL when the message had no Message-ID.
+	MessageID             *string        `gorm:"size:255" json:"message_id,omitempty"`
 	IsRead                bool           `json:"is_read"`
 	IsStarred             bool           `json:"is_starred"`
 	IsDraft               bool           `gorm:"index:idx_emails_is_draft" json:"is_draft"`

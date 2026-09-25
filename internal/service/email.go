@@ -111,6 +111,7 @@ type IncomingAttachment struct {
 type ReceiveEmailInput struct {
 	MailboxID            string
 	ThreadID             string
+	MessageID            string
 	FromAddress          string
 	FromName             string
 	Subject              string
@@ -1815,6 +1816,10 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 	input.FromAddress = mailtext.ToValidUTF8(input.FromAddress)
 	input.FromName = mailtext.ToValidUTF8(input.FromName)
 	input.EnvelopeFrom = mailtext.ToValidUTF8(input.EnvelopeFrom)
+	var messageID *string
+	if mid := strings.TrimSpace(input.MessageID); mid != "" {
+		messageID = &mid
+	}
 	for i := range input.To {
 		input.To[i].Address = mailtext.ToValidUTF8(input.To[i].Address)
 		input.To[i].Name = mailtext.ToValidUTF8(input.To[i].Name)
@@ -1878,6 +1883,7 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 	email := database.Email{
 		AccountID:       mailbox.AccountID,
 		MailboxID:       mailbox.ID,
+		MessageID:       messageID,
 		Subject:         input.Subject,
 		Body:            input.Body,
 		FromAddress:     input.FromAddress,

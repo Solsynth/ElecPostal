@@ -76,6 +76,7 @@ func RegisterRoutes(r *gin.RouterGroup, emailSvc *service.EmailService) {
 		credentials.POST("", func(c *gin.Context) { createMailCredential(c, emailSvc) })
 		credentials.DELETE("/:id", func(c *gin.Context) { deleteMailCredential(c, emailSvc) })
 	}
+	r.POST("/import", func(c *gin.Context) { importEmails(c, emailSvc) })
 	admin := r.Group("/admin")
 	{
 		dmarc := admin.Group("/dmarc")
@@ -423,6 +424,25 @@ func sendEmail(c *gin.Context, emailSvc *service.EmailService) {
 		return
 	}
 	c.JSON(http.StatusCreated, email)
+}
+
+func importEmails(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 128<<20) // 128 MiB batch cap
+	var input service.ImportEmailsInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	result, err := emailSvc.ImportEmails(c.Request.Context(), uuid.MustParse(accountID), input)
+	if err != nil {
+		renderServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, result)
 }
 
 func getEmail(c *gin.Context, emailSvc *service.EmailService) {

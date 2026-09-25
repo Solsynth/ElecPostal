@@ -514,6 +514,9 @@ func (s *EmailService) AppendProtocolMessage(ctx context.Context, mailboxID, fol
 	if httpFolder != folderDrafts {
 		email.DeliveryStatus = ""
 	}
+	if parsed.ID != "" {
+		email.MessageID = &parsed.ID
+	}
 	var uid uint32
 	var modSeq uint64
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {

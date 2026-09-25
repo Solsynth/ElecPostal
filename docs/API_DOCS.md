@@ -390,6 +390,65 @@ Non-draft emails include delivery metadata: `delivery_status` (`pending`,
 `sent`, `failed`, or `not_configured`), `delivery_attempts`, the last attempt
 time, an optional provider message ID, and an error when delivery failed.
 
+### Import emails
+
+`POST /api/import`
+
+Persists structured mail items directly into each item's mailbox INBOX. Unlike
+SMTP delivery, imports are archival: no spam routing, notifications,
+forwarding, DMARC intake, or real-time events fire.
+
+```json
+{
+  "emails": [
+    {
+      "mailbox_id": "01J...",
+      "message_id": "<abc@example.com>",
+      "from_address": "sender@example.net",
+      "from_name": "Sender",
+      "subject": "Hello",
+      "body": "Message text",
+      "content_type": "text/plain",
+      "to": [{"address": "alice@example.com", "name": "Alice"}],
+      "cc": [],
+      "sent_at": "2026-01-02T03:04:05Z",
+      "attachment_ids": []
+    }
+  ],
+  "dedupe": "message_id"
+}
+```
+
+`dedupe` defaults to `message_id` and may be `off`. With `message_id`, items
+are deduplicated per mailbox by the supplied `message_id`: the same logical
+email imported into multiple mailboxes lands in each, while a `message_id`
+already present in a mailbox (from this batch or from earlier SMTP/IMAP mail)
+is skipped. Items without a `message_id` are never deduplicated.
+
+Returns `200 OK`:
+
+```json
+{
+  "imported": 1,
+  "duplicates": 0,
+  "failed": 0,
+  "items": [
+    {"index": 0, "status": "imported", "email_id": "01J..."}
+  ]
+}
+```
+
+Each item reports `imported`, `duplicate`, or `failed`; `failed` items carry an
+`error`. One item failing does not affect the rest of the batch. The request is
+limited to 500 items and a 128 MiB body. Whole-request errors (invalid `dedupe`,
+empty or oversized `emails`, or a workspace quota failure) return an error
+status; already-imported items persist and a retry with `dedupe: "message_id"`
+skips them.
+
+Attachments are DysonFS file IDs resolved like `POST /api/emails`; an item
+fails when the byte store is unconfigured or an ID is invalid, and attachments
+are never silently dropped.
+
 ### Resend an email
 
 `POST /api/emails/{email-id}/resend`
