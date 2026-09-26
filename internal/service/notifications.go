@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"time"
 
 	"github.com/google/uuid"
 
@@ -30,12 +29,6 @@ func (s *EmailService) SetAccountLanguageProvider(provider account.Provider) {
 // SetNotificationSummarizer enables personality-service summaries.
 func (s *EmailService) SetNotificationSummarizer(summarizer personality.Summarizer) {
 	s.summarizer = summarizer
-}
-
-// SetNotificationSummaryLimit caps how many summaries one account may receive
-// per UTC day. Zero disables summarization, whatever the account asked for.
-func (s *EmailService) SetNotificationSummaryLimit(limit int) {
-	s.summaryLimit = limit
 }
 
 // NotificationSettings returns the account's notification preferences, or the
@@ -130,22 +123,11 @@ func (s *EmailService) notificationLanguage(ctx context.Context, accountID uuid.
 }
 
 // summarizeForNotification asks the personality service for a summary and
-// stores it on the message. Failures and exhausted daily limits leave the
-// notification on its subject fallback.
+// stores it on the message. Every quota decision belongs to the Personality
+// service: it meters these calls against the account's own usage limits and
+// billing, so a refusal simply leaves the notification on its subject fallback.
 func (s *EmailService) summarizeForNotification(ctx context.Context, email *database.Email, language string) string {
-	if s.summarizer == nil || s.summaryLimit <= 0 {
-		return ""
-	}
-	used, err := s.summariesUsedToday(ctx, email.AccountID)
-	if err != nil {
-		logging.Log.Warn().Err(err).Str("account_id", email.AccountID.String()).Msg("failed to count notification summaries")
-		return ""
-	}
-	if used >= int64(s.summaryLimit) {
-		logging.Log.Info().
-			Str("account_id", email.AccountID.String()).
-			Int("limit", s.summaryLimit).
-			Msg("daily notification summary limit reached")
+	if s.summarizer == nil {
 		return ""
 	}
 	summary, err := s.summarizer.Summarize(ctx, personality.SummaryRequest{
@@ -156,7 +138,13 @@ func (s *EmailService) summarizeForNotification(ctx context.Context, email *data
 		Body:      mailtext.Text(email.Body, email.ContentType),
 	})
 	if err != nil {
-		logging.Log.Warn().Err(err).Str("email_id", email.ID).Msg("failed to summarize incoming email")
+		event := logging.Log.Debug()
+		message := "skipping notification summary"
+		if !personality.IsAccessRejection(err) {
+			event = logging.Log.Warn()
+			message = "failed to summarize incoming email"
+		}
+		event.Err(err).Str("account_id", email.AccountID.String()).Str("email_id", email.ID).Msg(message)
 		return ""
 	}
 	if err := s.db.WithContext(ctx).Model(&database.Email{}).Where("id = ?", email.ID).Update("summary", summary).Error; err != nil {
@@ -164,15 +152,4 @@ func (s *EmailService) summarizeForNotification(ctx context.Context, email *data
 		logging.Log.Warn().Err(err).Str("email_id", email.ID).Msg("failed to store notification summary")
 	}
 	return summary
-}
-
-// summariesUsedToday counts the summaries an account received in the current
-// UTC day, which is also the usage window the fleet's AI billing uses.
-func (s *EmailService) summariesUsedToday(ctx context.Context, accountID uuid.UUID) (int64, error) {
-	var used int64
-	dayStart := time.Now().UTC().Truncate(24 * time.Hour)
-	err := s.db.WithContext(ctx).Model(&database.Email{}).
-		Where("account_id = ? AND summary <> '' AND created_at >= ?", accountID, dayStart).
-		Count(&used).Error
-	return used, err
 }

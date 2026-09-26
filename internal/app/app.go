@@ -74,7 +74,6 @@ func New(cfg *config.Config) (*App, error) {
 			emailSvc.SetAccountLanguageProvider(accountClient)
 			logging.Log.Info().Str("target", cfg.Auth.Target).Msg("notification localization account provider configured")
 		}
-		emailSvc.SetNotificationSummaryLimit(cfg.Personality.DailyLimit)
 		if cfg.Personality.Target != "" {
 			summarizer, err := personality.NewClient(personality.Config{
 				Target:        cfg.Personality.Target,
@@ -91,7 +90,6 @@ func New(cfg *config.Config) (*App, error) {
 			logging.Log.Info().
 				Str("target", cfg.Personality.Target).
 				Str("agent", cfg.Personality.Agent).
-				Int("daily_limit", cfg.Personality.DailyLimit).
 				Msg("notification summarizer configured")
 		}
 	}

@@ -593,10 +593,16 @@ When `personality.target` is configured and an account enables summaries, a
 message that carries no code, security event, or action request is summarized by
 the configured personality agent. The summary becomes both the notification
 subtitle (with `meta.source` set to `summary`) and the email's `summary` field.
-Summarization is skipped when the personality service is unavailable, when the
-agent answers with nothing usable, and once the account reaches
-`personality.dailyLimit` summaries for the current UTC day. Verification codes
-and security events are never sent to the agent, even when an account turns
+
+Each summary is a regular Personality completion, so it is metered against the
+mailbox owner's own Personality usage limits and billing (`[billing]` in the
+Persona deployment): a user over their hourly or daily AI threshold, without a
+payment wallet for a priced model, or blocked from Personality simply keeps the
+subject fallback, and the refusal is logged at debug level rather than as a
+failure. Summarization is also skipped when the personality service is
+unavailable, when the agent answers with nothing usable, and when the summary
+cannot be requested within `personality.timeoutSeconds`. Verification codes and
+security events are never sent to the agent, even when an account turns
 highlighting off.
 
 ### Notification settings

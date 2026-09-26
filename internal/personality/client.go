@@ -11,8 +11,10 @@ import (
 	"unicode/utf8"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
 	gen "src.solsynth.dev/sosys/go/proto"
@@ -133,6 +135,20 @@ func (c *Client) Summarize(ctx context.Context, request SummaryRequest) (string,
 }
 
 func (c *Client) Close() error { return c.conn.Close() }
+
+// IsAccessRejection reports whether the service refused the completion for an
+// account-level reason: a usage limit, a missing payment wallet, or a blocked
+// account. That is an expected outcome for a background summary rather than a
+// failure worth warning about, and the account's own Personality usage and
+// billing are what enforce it.
+func IsAccessRejection(err error) bool {
+	switch status.Code(err) {
+	case codes.ResourceExhausted, codes.FailedPrecondition, codes.PermissionDenied:
+		return true
+	default:
+		return false
+	}
+}
 
 // buildPrompt asks for one notification-sized line and hands the agent the
 // message content it needs, bounded by promptRuneLimit.

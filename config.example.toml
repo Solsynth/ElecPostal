@@ -134,13 +134,17 @@ tlsSkipVerify = false
 # Summaries are opt-in per account (see PATCH /api/settings/notifications) and
 # are only requested for messages our own rules found no verification code,
 # security event, or action request in, so credentials never reach the agent.
+#
+# Each summary is a normal Personality completion: it is metered against the
+# mailbox owner's own Personality usage limits and billing, so the per-account
+# quota lives in Persona's [billing] configuration, not here. Leave Persona's
+# billing enabled to keep summaries bounded; this service adds no separate cap.
 target = ""
 useTLS = false
 tlsSkipVerify = false
-agent = ""             # personality agent that writes the summaries, e.g. "michan"
+agent = ""             # personality agent that writes the summaries, e.g. "mail-summarizer"
 model = ""             # optional model override; empty uses the agent default
 timeoutSeconds = 20    # per-summary deadline; a slow agent is skipped
-dailyLimit = 20        # summaries per account per UTC day; 0 disables summaries
 
 [sentry]
 dsn = ""

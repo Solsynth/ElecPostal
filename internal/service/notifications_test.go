@@ -1,15 +1,21 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 
 	"src.solsynth.dev/sosys/elecpostal/internal/database"
+	"src.solsynth.dev/sosys/elecpostal/internal/logging"
 	"src.solsynth.dev/sosys/elecpostal/internal/mailintel"
 	"src.solsynth.dev/sosys/elecpostal/internal/personality"
 	"src.solsynth.dev/sosys/elecpostal/internal/ring"
@@ -82,7 +88,6 @@ func newNotificationFixture(t *testing.T) notificationFixture {
 	svc.SetWorkspaceProvider(fakeWorkspaceProvider{})
 	svc.SetAccountLanguageProvider(fakeLanguageProvider{language: "zh-CN"})
 	svc.SetNotificationSummarizer(summarizer)
-	svc.SetNotificationSummaryLimit(5)
 	svc.SetDomain("example.com")
 
 	accountID := uuid.New()
@@ -184,27 +189,22 @@ func TestReceiveEmailSummarizesOrdinaryMail(t *testing.T) {
 	}
 }
 
-func TestReceiveEmailStopsAtTheDailySummaryLimit(t *testing.T) {
+func TestReceiveEmailSkipsSummariesWhenTheAccountIsOverItsPersonalityLimit(t *testing.T) {
 	f := newNotificationFixture(t)
-	f.svc.SetNotificationSummaryLimit(1)
+	f.summarizer.err = status.Error(codes.ResourceExhausted, "Personality usage threshold exceeded: golds usage limit is 5")
 	if _, err := f.svc.UpdateNotificationSettings(context.Background(), f.accountID, UpdateNotificationSettingsInput{
 		Summarize: boolPtr(true),
 	}); err != nil {
 		t.Fatalf("UpdateNotificationSettings() error = %v", err)
 	}
-	if err := f.db.Create(&database.Email{
-		ID: database.NewID(), AccountID: f.accountID, MailboxID: f.mailbox.ID,
-		Subject: "Earlier mail", Body: "body", Folder: folderInbox, Summary: "already summarized today",
-	}).Error; err != nil {
-		t.Fatalf("create earlier email: %v", err)
-	}
 
 	f.receive(t, "This week at Acme", "Hello Ada, here is everything that shipped this week.")
-	if notification := f.sent(t); notification.Summary != "" {
-		t.Fatalf("summary = %q, want none once the daily limit is reached", notification.Summary)
+	notification := f.sent(t)
+	if notification.Summary != "" {
+		t.Fatalf("summary = %q, want none when Personality refuses the call", notification.Summary)
 	}
-	if len(f.summarizer.requests) != 0 {
-		t.Fatalf("summaries requested = %d, want 0", len(f.summarizer.requests))
+	if notification.Subject != "This week at Acme" {
+		t.Fatalf("subject = %q, want the notification to keep its fallback", notification.Subject)
 	}
 }
 
@@ -264,3 +264,41 @@ func TestNotificationSettingsDefaultAndUpdate(t *testing.T) {
 }
 
 func boolPtr(value bool) *bool { return &value }
+
+func TestNotifySummarizerRefusalsAreNotWarnings(t *testing.T) {
+	// A user over their Personality quota is an expected outcome, not an
+	// operator problem: it must not warn on every delivered message.
+	for name, test := range map[string]struct {
+		err  error
+		want string
+	}{
+		"quota refusal is quiet": {
+			err:  status.Error(codes.ResourceExhausted, "Personality usage threshold exceeded"),
+			want: "skipping notification summary",
+		},
+		"service failure warns": {
+			err:  status.Error(codes.Unavailable, "personality service unavailable"),
+			want: "failed to summarize incoming email",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var logs bytes.Buffer
+			previous := logging.Log
+			logging.Log = zerolog.New(&logs).Level(zerolog.DebugLevel)
+			t.Cleanup(func() { logging.Log = previous })
+
+			f := newNotificationFixture(t)
+			f.summarizer.err = test.err
+			if _, err := f.svc.UpdateNotificationSettings(context.Background(), f.accountID, UpdateNotificationSettingsInput{
+				Summarize: boolPtr(true),
+			}); err != nil {
+				t.Fatalf("UpdateNotificationSettings() error = %v", err)
+			}
+			f.receive(t, "This week at Acme", "Hello Ada, here is everything that shipped this week.")
+
+			if got := logs.String(); !strings.Contains(got, test.want) {
+				t.Fatalf("logs = %q, want %q", got, test.want)
+			}
+		})
+	}
+}

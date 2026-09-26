@@ -162,9 +162,6 @@ type PersonalityConfig struct {
 	Model string `mapstructure:"model"`
 	// TimeoutSeconds bounds one summary. Zero uses the client default.
 	TimeoutSeconds int `mapstructure:"timeoutSeconds"`
-	// DailyLimit caps summaries per account per UTC day. Zero disables
-	// summarization entirely, whatever an account asked for.
-	DailyLimit int `mapstructure:"dailyLimit"`
 }
 
 type SentryConfig struct {
@@ -230,7 +227,6 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("personality.agent", "")
 	v.SetDefault("personality.model", "")
 	v.SetDefault("personality.timeoutSeconds", 20)
-	v.SetDefault("personality.dailyLimit", 20)
 	v.SetDefault("sentry.dsn", "")
 	v.SetDefault("sentry.tracesSampleRate", 0.01)
 	v.SetDefault("sentry.environment", "")

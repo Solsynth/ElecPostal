@@ -2,6 +2,8 @@ package personality
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -165,5 +167,28 @@ func TestCleanSummaryIsBounded(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, "…") {
 		t.Fatalf("summary = %q, want a truncated line", got)
+	}
+}
+
+func TestIsAccessRejectionClassifiesAccountLevelRefusals(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "usage limit", err: status.Error(codes.ResourceExhausted, "usage limit is 5"), want: true},
+		{name: "wrapped usage limit", err: fmt.Errorf("complete summary: %w", status.Error(codes.ResourceExhausted, "usage limit is 5")), want: true},
+		{name: "payment wallet", err: status.Error(codes.FailedPrecondition, "a payment wallet is required"), want: true},
+		{name: "blocked account", err: status.Error(codes.PermissionDenied, "blocked"), want: true},
+		{name: "agent failure", err: status.Error(codes.NotFound, `agent "mail-summarizer" is unavailable`), want: false},
+		{name: "timeout", err: status.Error(codes.DeadlineExceeded, "deadline exceeded"), want: false},
+		{name: "transport error", err: errors.New("connection refused"), want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := IsAccessRejection(test.err); got != test.want {
+				t.Fatalf("IsAccessRejection(%v) = %v, want %v", test.err, got, test.want)
+			}
+		})
 	}
 }

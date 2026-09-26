@@ -261,7 +261,6 @@ type EmailService struct {
 	identities        relay.IdentityManager
 	language          account.Provider
 	summarizer        personality.Summarizer
-	summaryLimit      int
 	domain            string
 	inbound           string
 	dns               relay.DNSChecker
