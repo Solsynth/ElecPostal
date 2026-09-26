@@ -103,6 +103,7 @@ type SpamConfig struct {
 	Enabled        bool        `mapstructure:"enabled"`
 	Threshold      float64     `mapstructure:"threshold"`
 	AddXSpamHeader bool        `mapstructure:"addXSpamHeader"`
+	Segmenter      string      `mapstructure:"segmenter"`
 	Bayes          BayesConfig `mapstructure:"bayes"`
 }
 
@@ -237,6 +238,7 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("mail.spam.enabled", true)
 	v.SetDefault("mail.spam.threshold", 5.0)
 	v.SetDefault("mail.spam.addXSpamHeader", true)
+	v.SetDefault("mail.spam.segmenter", "gse")
 	v.SetDefault("mail.spam.bayes.enabled", true)
 	v.SetDefault("mail.spam.bayes.minLearns", 100)
 	v.SetDefault("mail.spam.bayes.minTokens", 11)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -142,14 +143,27 @@ func New(cfg *config.Config) (*App, error) {
 			bayesStore = spam.NewRedisStore(redisClient, spam.DefaultRedisPrefix)
 			redisClients = append(redisClients, redisClient)
 		}
+		var segmenter spam.Segmenter
+		if strings.EqualFold(strings.TrimSpace(cfg.Mail.Spam.Segmenter), "gse") {
+			loaded, err := spam.NewChineseSegmenter()
+			if err != nil {
+				// Segmentation is an accuracy refinement, never a gate: fall
+				// back to the dictionary-free character-bigram path.
+				logging.Log.Warn().Err(err).Msg("chinese segmenter unavailable; using character bigrams")
+			} else {
+				segmenter = loaded
+			}
+		}
 		emailSvc.SetSpamScorer(spam.NewService(spam.Config{
 			BayesEnabled: bayesStore != nil,
 			MinLearns:    cfg.Mail.Spam.Bayes.MinLearns,
 			MinTokens:    cfg.Mail.Spam.Bayes.MinTokens,
+			Segmenter:    segmenter,
 		}, bayesStore), cfg.Mail.Spam.Threshold, cfg.Mail.Spam.AddXSpamHeader)
 		logging.Log.Info().
 			Float64("threshold", cfg.Mail.Spam.Threshold).
 			Bool("bayes", bayesStore != nil).
+			Bool("segmenter", segmenter != nil).
 			Msg("spam filter enabled")
 	}
 	switch cfg.Mail.Relay.Adapter {

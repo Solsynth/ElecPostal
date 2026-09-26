@@ -79,6 +79,7 @@ tlsSkipVerify = false
 enabled = true
 threshold = 5.0            # score at or above which a message is routed to Spam. A single auth failure (<= 1.5) is never enough on its own
 addXSpamHeader = true      # write X-Spam-Status/X-Spam-Score into the stored protocol source
+segmenter = "gse"          # Chinese/Japanese word segmentation for the Bayes model: "gse" (pure-Go jieba with an embedded dictionary, adds ~8 MB to the binary) or "" for dictionary-free character bigrams. Latin text tokenizes identically either way; switching changes CJK features, so clear the Bayes model when you change it
 
 [mail.spam.bayes]
 # One global model for the whole deployment (stored in Redis under

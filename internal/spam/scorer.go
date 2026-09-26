@@ -54,6 +54,11 @@ type Config struct {
 	BayesEnabled bool
 	MinLearns    int // per-class minimum learns before Bayes contributes
 	MinTokens    int // minimum kept tokens before Bayes contributes
+	// Segmenter, when set, splits CJK text into dictionary words. Nil keeps the
+	// dictionary-free character-bigram path. Changing it changes the CJK
+	// feature set, so a model trained with one should not be scored with the
+	// other.
+	Segmenter Segmenter
 }
 
 // Service implements Scorer. A nil store disables Bayes (rules only).
@@ -100,7 +105,7 @@ func (s *Service) Learn(ctx context.Context, input Input, class string) error {
 	if err := validateClass(class); err != nil {
 		return err
 	}
-	hashes := Tokenize(input)
+	hashes := Tokenize(input, s.cfg.Segmenter)
 	if len(hashes) == 0 {
 		return nil
 	}
@@ -122,7 +127,7 @@ func (s *Service) Unlearn(ctx context.Context, input Input, class string) error 
 	if err := validateClass(class); err != nil {
 		return err
 	}
-	hashes := Tokenize(input)
+	hashes := Tokenize(input, s.cfg.Segmenter)
 	if len(hashes) == 0 {
 		return nil
 	}

@@ -11,7 +11,7 @@ import (
 // input. 0.5 means "no evidence". Store failures log and return 0.5 — Bayes
 // never blocks or fails a message.
 func (s *Service) classify(ctx context.Context, input Input) float64 {
-	toks := tokenizeTokens(input)
+	toks := tokenizeTokens(input, s.cfg.Segmenter)
 	if len(toks) == 0 {
 		return 0.5
 	}

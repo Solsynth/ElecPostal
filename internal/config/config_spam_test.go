@@ -20,6 +20,9 @@ func TestDefaultMailSpam(t *testing.T) {
 	if !spam.AddXSpamHeader {
 		t.Fatal("mail.spam.addXSpamHeader default = false, want true")
 	}
+	if spam.Segmenter != "gse" {
+		t.Fatalf("mail.spam.segmenter default = %q, want gse", spam.Segmenter)
+	}
 	if !spam.Bayes.Enabled {
 		t.Fatal("mail.spam.bayes.enabled default = false, want true")
 	}
