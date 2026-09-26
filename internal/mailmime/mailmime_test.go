@@ -206,6 +206,41 @@ func TestRenderWritesThreadingHeaders(t *testing.T) {
 	}
 }
 
+// TestParseContentIDOnTextBodyIsNotAttachment pins the Outlook behavior where
+// the outbound transport tags a plain text body with a Content-ID header. The
+// body must stay the message body instead of being demoted to a spurious
+// "attachment" part, which previously emptied the message.
+func TestParseContentIDOnTextBodyIsNotAttachment(t *testing.T) {
+	raw := []byte("From: sender@example.test\r\nTo: recipient@example.test\r\nSubject: hello\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\nContent-ID: <E4AD0DC3E66A4144A86EE7C2DC287ABF@jpnprd01.prod.outlook.com>\r\n\r\n5L2g5aW9\r\n")
+	parsed, err := ParseMessage(raw, "sender@example.test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Body != "你好" {
+		t.Fatalf("body = %q, want %q", parsed.Body, "你好")
+	}
+	if len(parsed.Attachments) != 0 {
+		t.Fatalf("attachments = %#v, want none", parsed.Attachments)
+	}
+}
+
+// TestParseContentIDInlineImageIsAttachment keeps the inline-resource case: a
+// non-text part referenced by Content-ID remains an attachment even without an
+// explicit disposition or filename.
+func TestParseContentIDInlineImageIsAttachment(t *testing.T) {
+	raw := []byte("Content-Type: multipart/related; boundary=rel\r\n\r\n--rel\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>Hello <img src=\"cid:logo-123\"></p>\r\n--rel\r\nContent-Type: image/png\r\nContent-ID: <logo-123>\r\nContent-Transfer-Encoding: base64\r\n\r\naW1hZ2U=\r\n--rel--")
+	parsed, err := ParseMessage(raw, "sender@example.test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.Attachments) != 1 {
+		t.Fatalf("attachments = %#v, want the inline image", parsed.Attachments)
+	}
+	if parsed.Attachments[0].ContentID != "logo-123" || parsed.Attachments[0].MimeType != "image/png" {
+		t.Fatalf("inline image metadata = %#v", parsed.Attachments[0])
+	}
+}
+
 func TestRenderOmitsThreadingHeadersWhenAbsent(t *testing.T) {
 	source := MessageSource{
 		FromAddress: "sender@example.test", Subject: "Fresh", Body: "body", BodyType: "text/plain",

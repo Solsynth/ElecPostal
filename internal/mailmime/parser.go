@@ -145,7 +145,21 @@ func ParseEntity(header mail.Header, body io.Reader) (plain, html string, attach
 	if filename == "" {
 		filename = mailtext.DecodeHeader(params["name"])
 	}
-	if strings.EqualFold(disposition, "attachment") || strings.EqualFold(disposition, "inline") || filename != "" || contentID != "" {
+	// A part is an attachment only when explicitly marked as one (attachment
+	// disposition or a filename) or when it is a non-text inline resource
+	// referenced by Content-ID (e.g. cid: images). A Content-ID alone on a
+	// text body part is not an attachment signal: intermediaries such as
+	// Outlook add Content-ID headers to plain text bodies, and classifying
+	// them as attachments would empty the message body into a spurious
+	// "attachment" part.
+	isAttachment := strings.EqualFold(disposition, "attachment") || filename != ""
+	if !isAttachment {
+		isText := strings.EqualFold(mediaType, "text/plain") || strings.EqualFold(mediaType, "text/html")
+		if !isText && (strings.EqualFold(disposition, "inline") || contentID != "") {
+			isAttachment = true
+		}
+	}
+	if isAttachment {
 		if filename == "" {
 			filename = "attachment"
 		}
