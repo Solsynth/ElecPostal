@@ -110,6 +110,10 @@ func (c *Client) SendEmailNotification(ctx context.Context, notification EmailNo
 			Body:     localization.Localize(language, "newEmailFromBody", map[string]string{"sender": fromName}),
 			Meta:     payload,
 			AppId:    &appID,
+			// Ring records a notification for the account's history only when
+			// the sender marks it savable, and an email that is not in the
+			// history is a message the reader never learns about.
+			IsSavable: true,
 		},
 	})
 	return err

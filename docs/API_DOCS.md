@@ -610,6 +610,11 @@ Ring app, and its title and body are localized to the recipient's account
 language (resolved through `auth.target`), falling back to English. An empty
 subject renders as the localized "no subject" copy.
 
+The push is marked savable, so Ring keeps it in the account's notification
+history and replays it to a device that was offline when the message arrived.
+Ring discards a notification it is not asked to save, which would leave the
+message with no entry in the app's notification list.
+
 Notifications surface the part of the message a recipient most likely needs
 rather than a leading excerpt. A verification code the message introduces
 (`123456`, `123 456`, `A1B2C3`, Chinese copy) becomes the subtitle and is

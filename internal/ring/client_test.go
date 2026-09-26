@@ -88,6 +88,14 @@ func TestSendEmailNotificationTargetsSolWattApp(t *testing.T) {
 	if got := metaOf(t, notification); got["email_id"] != "email-1" || len(got) != 1 {
 		t.Fatalf("meta = %v, want only the email id", got)
 	}
+	// Ring only keeps the notification in the account's history when the
+	// sender asks for it, so the app's notification list would stay empty.
+	if !notification.GetIsSavable() {
+		t.Fatal("is_savable = false, want the notification in the account history")
+	}
+	if notification.GetIsSilent() {
+		t.Fatalf("is_silent = true, want an alerting notification")
+	}
 }
 
 func TestSendEmailNotificationRendersHighlights(t *testing.T) {
