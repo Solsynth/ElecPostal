@@ -30,7 +30,7 @@ Key settings:
 - `auth.useTLS`
 - `filesystem.target` (optional FileSystem gRPC endpoint for inbound email attachments)
 - `workspace.target` (Workspace gRPC endpoint required for workspace mailbox authorization and plan-based mail quotas)
-- `ring.target` (optional Ring gRPC endpoint for account notifications)
+- `ring.target` (optional Ring gRPC endpoint for account notifications; pushes target the `dev.solsynth.solarwatt` app, are localized to the recipient's account language via `auth.target`, and surface the extracted verification code or key sentence instead of a leading excerpt)
 - `mail.domain` (canonical mail domain; local-only mailbox addresses are completed with this domain before outbound delivery and exposed via `GET /api/mail/host`)
 
 ## Attachments

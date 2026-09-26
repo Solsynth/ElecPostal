@@ -23,6 +23,7 @@ import (
 	"src.solsynth.dev/sosys/elecpostal/internal/mailtext"
 	"src.solsynth.dev/sosys/elecpostal/internal/realtime"
 	"src.solsynth.dev/sosys/elecpostal/internal/relay"
+	"src.solsynth.dev/sosys/elecpostal/internal/ring"
 	"src.solsynth.dev/sosys/elecpostal/internal/workspace"
 	gen "src.solsynth.dev/sosys/go/proto"
 )
@@ -402,7 +403,7 @@ func (s *EmailService) normalizeFromAddress(address string) string {
 // NotificationSender is the gRPC notification capability required by the
 // email domain without coupling it to a particular service implementation.
 type NotificationSender interface {
-	SendEmailNotification(context.Context, string, string, string, string) error
+	SendEmailNotification(context.Context, ring.EmailNotification) error
 	Close() error
 }
 
@@ -1977,7 +1978,14 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 		return nil, err
 	}
 	if s.notifier != nil && email.Folder == folderInbox {
-		if err := s.notifier.SendEmailNotification(ctx, mailbox.AccountID.String(), email.ID, input.Subject, input.FromName); err != nil {
+		if err := s.notifier.SendEmailNotification(ctx, ring.EmailNotification{
+			AccountID:   mailbox.AccountID.String(),
+			EmailID:     email.ID,
+			Subject:     email.Subject,
+			FromName:    email.FromName,
+			Body:        email.Body,
+			ContentType: email.ContentType,
+		}); err != nil {
 			logging.Log.Warn().Err(err).Str("account_id", mailbox.AccountID.String()).Msg("failed to send incoming email notification")
 		}
 	}

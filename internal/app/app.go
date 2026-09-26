@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"time"
 
+	"src.solsynth.dev/sosys/elecpostal/internal/account"
 	"src.solsynth.dev/sosys/elecpostal/internal/config"
 	"src.solsynth.dev/sosys/elecpostal/internal/database"
 	"src.solsynth.dev/sosys/elecpostal/internal/filesystem"
@@ -59,6 +60,14 @@ func New(cfg *config.Config) (*App, error) {
 		notifier, err = ring.NewClient(cfg.Ring.Target, cfg.Ring.UseTLS, cfg.Ring.TLSSkipVerify)
 		if err != nil {
 			return nil, err
+		}
+		if cfg.Auth.Target != "" {
+			accountClient, err := account.NewClient(cfg.Auth.Target, cfg.Auth.UseTLS, cfg.Auth.TLSSkipVerify)
+			if err != nil {
+				return nil, err
+			}
+			notifier.SetLanguageResolver(accountClient)
+			logging.Log.Info().Str("target", cfg.Auth.Target).Msg("notification localization account provider configured")
 		}
 	}
 

@@ -7,12 +7,28 @@ import (
 	"golang.org/x/net/html"
 )
 
+// textRuneLimit bounds Text so analyzing an adversarial message cannot
+// allocate an unbounded string. Real messages reach their notification-worthy
+// content long before this limit.
+const textRuneLimit = 16384
+
+// Text returns the readable text of a message body, HTML markup and non-content
+// elements removed, bounded by textRuneLimit runes. Unlike Summary it does not
+// stop at the leading characters, so callers can search the whole message.
+func Text(body, contentType string) string {
+	return render(body, contentType, textRuneLimit)
+}
+
 func Summary(body, contentType string, maxRunes int) string {
 	if maxRunes <= 0 {
 		return ""
 	}
+	return render(body, contentType, maxRunes)
+}
+
+func render(body, contentType string, limit int) string {
 	var text summaryBuilder
-	text.limit = maxRunes
+	text.limit = limit
 	if strings.EqualFold(strings.TrimSpace(contentType), "text/html") {
 		htmlText(body, &text)
 	} else {

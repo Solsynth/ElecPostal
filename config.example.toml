@@ -25,7 +25,7 @@ consumer = "elecpostal-smtp-workers"
 workers = 8
 
 [auth]
-target = "stargate:9090" # Stargate auth gRPC target (DyAuthService; took over Padlock's auth surface); leave empty to disable auth
+target = "stargate:9090" # Stargate gRPC target (DyAuthService for request auth, DyAccountService for notification localization); leave empty to disable auth
 useTLS = true            # Stargate serves the fleet self-signed cert
 tlsSkipVerify = true
 
@@ -119,7 +119,7 @@ certFile = ""
 keyFile = ""
 
 [ring]
-target = ""              # Ring gRPC target (host:port); leave empty to disable notifications
+target = ""              # Ring gRPC target (host:port); leave empty to disable notifications. Pushes target the dev.solsynth.solarwatt app (auth.target resolves the recipient language)
 useTLS = false
 tlsSkipVerify = false
 

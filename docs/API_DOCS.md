@@ -572,7 +572,19 @@ packets through the DysonNetwork WebSocket gateway under the
 
 When `ring.target` is configured, each new Inbox email also sends a standard
 account push notification with the email ID in its metadata. Spam messages do
-not trigger user notifications.
+not trigger user notifications. The push targets the `dev.solsynth.solarwatt`
+Ring app, and its title and body are localized to the recipient's account
+language (resolved through `auth.target`), falling back to English. An empty
+subject renders as the localized "no subject" copy.
+
+Notifications surface the part of the message a recipient most likely needs
+rather than a leading excerpt. A verification code the message introduces
+(`123456`, `123 456`, `A1B2C3`, Chinese copy) becomes the subtitle and is
+mirrored in `meta.code`; a security event (password change, new sign-in) or an
+action request (confirm, invoice past due, expiry) surfaces its own sentence
+instead of the subject. `meta.kind` carries `code`, `security`, or `action` for
+clients that want to style or route the push, and `meta` always carries
+`email_id`. Messages where nothing stands out keep the subject as the subtitle.
 
 ### Star and unstar
 
