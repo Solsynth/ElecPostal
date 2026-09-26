@@ -3,14 +3,16 @@ package app
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/http"
+	"time"
+
+	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
-	"net"
-	"net/http"
-	"time"
 
 	"src.solsynth.dev/sosys/elecpostal/internal/account"
 	"src.solsynth.dev/sosys/elecpostal/internal/config"
@@ -24,24 +26,27 @@ import (
 	"src.solsynth.dev/sosys/elecpostal/internal/realtime"
 	"src.solsynth.dev/sosys/elecpostal/internal/relay"
 	"src.solsynth.dev/sosys/elecpostal/internal/ring"
+	"src.solsynth.dev/sosys/elecpostal/internal/senderauth"
 	"src.solsynth.dev/sosys/elecpostal/internal/server"
 	"src.solsynth.dev/sosys/elecpostal/internal/service"
 	"src.solsynth.dev/sosys/elecpostal/internal/smtp"
+	"src.solsynth.dev/sosys/elecpostal/internal/spam"
 	"src.solsynth.dev/sosys/elecpostal/internal/workspace"
 )
 
 // App is the application runtime.
 type App struct {
-	cfg       *config.Config
-	db        *database.DB
-	emailSvc  *service.EmailService
-	httpSrv   *http.Server
-	grpcSrv   *grpc.Server
-	grpcLn    net.Listener
-	smtpSrvs  []*smtp.Server
-	smtpQueue *smtp.NATSQueue
-	imapSrvs  []*imap.Server
-	pop3Srvs  []*pop3.Server
+	cfg          *config.Config
+	db           *database.DB
+	emailSvc     *service.EmailService
+	httpSrv      *http.Server
+	grpcSrv      *grpc.Server
+	grpcLn       net.Listener
+	smtpSrvs     []*smtp.Server
+	smtpQueue    *smtp.NATSQueue
+	imapSrvs     []*imap.Server
+	pop3Srvs     []*pop3.Server
+	redisClients []*redis.Client
 }
 
 const healthServiceName = "elecpostal"
@@ -129,6 +134,24 @@ func New(cfg *config.Config) (*App, error) {
 	if err := emailSvc.SetDNSResolver(cfg.Mail.Relay.DNSResolver); err != nil {
 		return nil, fmt.Errorf("configure DNS resolver: %w", err)
 	}
+	var redisClients []*redis.Client
+	if cfg.Mail.Spam.Enabled {
+		var bayesStore spam.Store
+		if cfg.Redis.Addr != "" && cfg.Mail.Spam.Bayes.Enabled {
+			redisClient := redis.NewClient(&redis.Options{Addr: cfg.Redis.Addr, DB: cfg.Redis.DB})
+			bayesStore = spam.NewRedisStore(redisClient, spam.DefaultRedisPrefix)
+			redisClients = append(redisClients, redisClient)
+		}
+		emailSvc.SetSpamScorer(spam.NewService(spam.Config{
+			BayesEnabled: bayesStore != nil,
+			MinLearns:    cfg.Mail.Spam.Bayes.MinLearns,
+			MinTokens:    cfg.Mail.Spam.Bayes.MinTokens,
+		}, bayesStore), cfg.Mail.Spam.Threshold, cfg.Mail.Spam.AddXSpamHeader)
+		logging.Log.Info().
+			Float64("threshold", cfg.Mail.Spam.Threshold).
+			Bool("bayes", bayesStore != nil).
+			Msg("spam filter enabled")
+	}
 	switch cfg.Mail.Relay.Adapter {
 	case "direct-smtp":
 		directRelay, err := relay.NewDirectSMTPAdapter(relay.DirectSMTPConfig{
@@ -168,12 +191,25 @@ func New(cfg *config.Config) (*App, error) {
 		logging.Log.Info().Str("target", cfg.Workspace.Target).Msg("workspace quota provider configured")
 	}
 	router := server.NewRouter(cfg, emailSvc)
+	// One shared sender-authentication verifier serves every listener: its DNS
+	// cache is per-deployment state.
+	var authVerifier senderauth.Verifier
+	if cfg.Mail.Spam.Enabled {
+		resolver, err := relay.NewDNSResolver(cfg.Mail.Relay.DNSResolver)
+		if err != nil {
+			return nil, fmt.Errorf("configure sender authentication resolver: %w", err)
+		}
+		authVerifier = senderauth.NewVerifier(senderauth.Config{Resolver: resolver, Timeout: senderauth.DefaultTimeout})
+	}
 	smtpConfigs := cfg.Mail.SMTP
 	smtpSrvs := make([]*smtp.Server, 0, len(smtpConfigs))
 	for _, listener := range smtpConfigs {
 		smtpSrv, err := smtp.New(listener, cfg.Mail.Domain, emailSvc)
 		if err != nil {
 			return nil, fmt.Errorf("configure SMTP server: %w", err)
+		}
+		if authVerifier != nil {
+			smtpSrv.SetAuthVerifier(authVerifier)
 		}
 		smtpSrvs = append(smtpSrvs, smtpSrv)
 	}
@@ -233,15 +269,16 @@ func New(cfg *config.Config) (*App, error) {
 	reflection.Register(grpcSrv)
 
 	return &App{
-		cfg:       cfg,
-		db:        db,
-		emailSvc:  emailSvc,
-		httpSrv:   httpSrv,
-		grpcSrv:   grpcSrv,
-		smtpSrvs:  smtpSrvs,
-		smtpQueue: smtpQueue,
-		imapSrvs:  imapSrvs,
-		pop3Srvs:  pop3Srvs,
+		cfg:          cfg,
+		db:           db,
+		emailSvc:     emailSvc,
+		httpSrv:      httpSrv,
+		grpcSrv:      grpcSrv,
+		smtpSrvs:     smtpSrvs,
+		smtpQueue:    smtpQueue,
+		imapSrvs:     imapSrvs,
+		pop3Srvs:     pop3Srvs,
+		redisClients: redisClients,
 	}, nil
 }
 
@@ -389,6 +426,9 @@ func (a *App) Stop(ctx context.Context) error {
 	}
 	if a.emailSvc != nil {
 		_ = a.emailSvc.Close()
+	}
+	for _, client := range a.redisClients {
+		_ = client.Close()
 	}
 	return nil
 }

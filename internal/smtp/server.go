@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -22,12 +23,15 @@ import (
 	gosasl "github.com/emersion/go-sasl"
 	gosmtp "github.com/emersion/go-smtp"
 	"github.com/google/uuid"
+	"gorm.io/datatypes"
 
 	"src.solsynth.dev/sosys/elecpostal/internal/config"
 	"src.solsynth.dev/sosys/elecpostal/internal/database"
+	"src.solsynth.dev/sosys/elecpostal/internal/logging"
 	"src.solsynth.dev/sosys/elecpostal/internal/mailmime"
 	"src.solsynth.dev/sosys/elecpostal/internal/mailtext"
 	"src.solsynth.dev/sosys/elecpostal/internal/relay"
+	"src.solsynth.dev/sosys/elecpostal/internal/senderauth"
 	"src.solsynth.dev/sosys/elecpostal/internal/service"
 )
 
@@ -55,6 +59,7 @@ type Server struct {
 	domain   string
 	service  Backend
 	delivery DeliveryQueue
+	auth     senderauth.Verifier
 	tls      *tls.Config
 	server   *gosmtp.Server
 	ln       net.Listener
@@ -102,6 +107,12 @@ func (s *Server) SetDeliveryQueue(q DeliveryQueue) {
 	if q != nil {
 		s.delivery = q
 	}
+}
+
+// SetAuthVerifier installs the SPF/DKIM/DMARC verifier run on unauthenticated
+// inbound DATA. A nil verifier disables sender authentication.
+func (s *Server) SetAuthVerifier(v senderauth.Verifier) {
+	s.auth = v
 }
 func (s *Server) Start() error {
 	if !s.cfg.Enabled {
@@ -155,14 +166,19 @@ func (s *Server) maxMessageBytes() int64 {
 }
 
 // NewSession implements go-smtp.Backend.
-func (s *Server) NewSession(_ *gosmtp.Conn) (gosmtp.Session, error) {
-	return &smtpSession{server: s}, nil
+func (s *Server) NewSession(c *gosmtp.Conn) (gosmtp.Session, error) {
+	session := &smtpSession{server: s}
+	if c != nil && c.Conn() != nil && c.Conn().RemoteAddr() != nil {
+		session.peerIP = c.Conn().RemoteAddr().String()
+	}
+	return session, nil
 }
 
 type smtpSession struct {
 	server        *Server
 	authenticated bool
 	principal     *service.ProtocolPrincipal
+	peerIP        string
 	from          string
 	recipients    []recipient
 }
@@ -240,11 +256,31 @@ func (ss *smtpSession) Data(r io.Reader) error {
 		ss.Reset()
 		return nil
 	}
-	if err := ss.server.delivery.Enqueue(context.Background(), newDeliveryJob(message, ss.from, ss.recipients)); err != nil {
+	// Sender authentication runs only for unauthenticated inbound mail: this is
+	// the single point where the raw bytes, the peer IP and the envelope exist
+	// together. Failures are absorbed by the verifier and never reject the
+	// message.
+	authentication := ss.verifySender(raw)
+	if err := ss.server.delivery.Enqueue(context.Background(), newDeliveryJob(message, ss.from, ss.recipients, authentication)); err != nil {
 		return err
 	}
 	ss.Reset()
 	return nil
+}
+
+// verifySender runs the SPF/DKIM/DMARC verifier and returns the serialized
+// result, or nil when no verifier is configured.
+func (ss *smtpSession) verifySender(raw []byte) datatypes.JSON {
+	if ss.server.auth == nil {
+		return nil
+	}
+	result := ss.server.auth.Verify(context.Background(), raw, ss.from, ss.peerIP)
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		logging.Log.Warn().Err(err).Msg("encode sender authentication result failed")
+		return nil
+	}
+	return encoded
 }
 
 // submit handles SMTP submission from an authenticated mailbox. Local
@@ -278,7 +314,9 @@ func (ss *smtpSession) submit(message parsedMessage, raw []byte) error {
 		}
 	}
 	if len(local) > 0 {
-		if err := deliverJob(context.Background(), ss.server.service, newDeliveryJob(message, ss.from, local)); err != nil {
+		// Authenticated submission is a trusted client: no sender
+		// authentication is performed (matching rspamd's behaviour).
+		if err := deliverJob(context.Background(), ss.server.service, newDeliveryJob(message, ss.from, local, nil)); err != nil {
 			return err
 		}
 	}

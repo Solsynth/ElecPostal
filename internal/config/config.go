@@ -92,6 +92,25 @@ type MailConfig struct {
 	IMAP       []ListenerConfig     `mapstructure:"imap"`
 	POP3       []ListenerConfig     `mapstructure:"pop3"`
 	SendLimits MailSendLimitsConfig `mapstructure:"sendLimits"`
+	Spam       SpamConfig           `mapstructure:"spam"`
+}
+
+// SpamConfig controls the inbound spam filter (weighted symbol rules plus an
+// optional global Bayes classifier). Symbol weights are fixed in code; only
+// the routing threshold, the header toggle and the Bayes tuning are
+// configurable.
+type SpamConfig struct {
+	Enabled        bool        `mapstructure:"enabled"`
+	Threshold      float64     `mapstructure:"threshold"`
+	AddXSpamHeader bool        `mapstructure:"addXSpamHeader"`
+	Bayes          BayesConfig `mapstructure:"bayes"`
+}
+
+// BayesConfig tunes the global Bayes model shared by every mailbox.
+type BayesConfig struct {
+	Enabled   bool `mapstructure:"enabled"`
+	MinLearns int  `mapstructure:"minLearns"`
+	MinTokens int  `mapstructure:"minTokens"`
 }
 
 // MailSendLimitConfig configures outgoing message limits for one plan.
@@ -215,6 +234,12 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("mail.relay.port", "587")
 	v.SetDefault("mail.relay.tlsMode", "starttls")
 	v.SetDefault("mail.relay.dnsResolver", "1.1.1.1")
+	v.SetDefault("mail.spam.enabled", true)
+	v.SetDefault("mail.spam.threshold", 5.0)
+	v.SetDefault("mail.spam.addXSpamHeader", true)
+	v.SetDefault("mail.spam.bayes.enabled", true)
+	v.SetDefault("mail.spam.bayes.minLearns", 100)
+	v.SetDefault("mail.spam.bayes.minTokens", 11)
 	v.SetDefault("ring.target", "")
 	v.SetDefault("ring.useTLS", false)
 	v.SetDefault("ring.tlsSkipVerify", false)

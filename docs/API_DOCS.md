@@ -373,20 +373,49 @@ accepted from `POST /api/emails`.
   "authentication": {
     "spf": "fail",
     "dkim": "fail",
-    "score": 80,
+    "dmarc": "reject",
+    "score": 5.5,
+    "symbols": [
+      { "name": "R_SPF_FAIL", "weight": 1.5 },
+      { "name": "R_DKIM_REJECT", "weight": 1.5 },
+      { "name": "DMARC_POLICY_REJECT", "weight": 2.0 },
+      { "name": "MONEY_PHRASES", "weight": 1.0 }
+    ],
     "warnings": [
       "Possible phishing: SPF verification failed",
-      "Possible forgery: DKIM signature is invalid"
+      "Possible forgery: DKIM signature is invalid",
+      "Domain policy rejects unauthenticated mail"
     ]
   }
 }
 ```
 
 `spf` and `dkim` may be `pass`, `fail`, `softfail`, `none`, `temperror`, or
-`permerror` when evaluated. A missing record (`none`) or temporary DNS failure
-does not by itself move mail to Spam, but may increase `score`. Explicit
-verification failures are retained in Spam and do not trigger push
-notifications.
+`permerror` when evaluated. `dmarc` adds the policy outcome: `allow` when SPF or
+DKIM was aligned, otherwise `reject`, `quarantine`, or `none` for the published
+policy. A missing record (`none`) or temporary DNS failure does not by itself
+move mail to Spam, but may increase `score`. Explicit verification failures are
+retained in Spam and do not trigger push notifications.
+
+`score` is the signed sum of the fired `symbols` (rspamd semantics), not a
+0-100 scale, and `symbols` lists each rule hit with its weight. Verification and
+scoring run for unauthenticated inbound SMTP only; messages submitted by an
+authenticated client carry no `authentication` object. Mail whose score reaches
+`mail.spam.threshold` is filed into Spam, and its stored source (and therefore
+`GET /api/emails/{email-id}/eml`, IMAP, POP3, and JMAP) carries
+`X-Spam-Status: Yes` and `X-Spam-Score` headers when
+`mail.spam.addXSpamHeader` is enabled. Mail is never rejected at SMTP time:
+a scoring or DNS failure leaves the message in the Inbox.
+
+`warnings` is deduplicated and includes one entry per strong symbol:
+
+| Symbol | Warning |
+| --- | --- |
+| `R_SPF_FAIL` | `Possible phishing: SPF verification failed` |
+| `R_DKIM_REJECT` | `Possible forgery: DKIM signature is invalid` |
+| `DMARC_POLICY_REJECT` | `Domain policy rejects unauthenticated mail` |
+| `DMARC_POLICY_QUARANTINE` | `Domain policy quarantines unauthenticated mail` |
+| `BLOCK_RULE` | `Sender is blocked by a mailbox block rule` |
 
 ### Conversations
 

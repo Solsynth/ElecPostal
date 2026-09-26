@@ -26,6 +26,7 @@ import (
 	"src.solsynth.dev/sosys/elecpostal/internal/realtime"
 	"src.solsynth.dev/sosys/elecpostal/internal/relay"
 	"src.solsynth.dev/sosys/elecpostal/internal/ring"
+	"src.solsynth.dev/sosys/elecpostal/internal/spam"
 	"src.solsynth.dev/sosys/elecpostal/internal/workspace"
 	gen "src.solsynth.dev/sosys/go/proto"
 )
@@ -268,10 +269,22 @@ type EmailService struct {
 	identities        relay.IdentityManager
 	language          account.Provider
 	summarizer        personality.Summarizer
+	spamScorer        spam.Scorer
+	spamThreshold     float64
+	spamXSpamHeader   bool
 	domain            string
 	inbound           string
 	dns               relay.DNSChecker
 	dnsLabel          string
+}
+
+// SetSpamScorer installs the inbound spam filter and its routing threshold.
+// addXSpamHeader controls whether stored spam carries X-Spam-Status/Score
+// headers. A nil scorer keeps the legacy block-rule and phrase routing.
+func (s *EmailService) SetSpamScorer(scorer spam.Scorer, threshold float64, addXSpamHeader bool) {
+	s.spamScorer = scorer
+	s.spamThreshold = threshold
+	s.spamXSpamHeader = addXSpamHeader
 }
 
 // SetRelay configures outbound delivery. A nil adapter retains the existing
@@ -2079,10 +2092,41 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 		threadID = database.NewID()
 	}
 	email.ThreadID = &threadID
-	if s.shouldRouteToSpam(ctx, mailbox, input.FromAddress, input.Subject, input.Body) {
-		email.Folder = folderSpam
-		now := time.Now()
-		email.SpamAt = &now
+	// Spam routing. Sender authentication already rides in on the delivery job;
+	// the scorer adds the weighted symbol verdict on top of it. DMARC
+	// aggregate-report intake is machine mail and is never scored.
+	if !isDmarcIntake {
+		isBlocked := s.isBlocked(ctx, mailbox, input.FromAddress)
+		routedToSpam := isBlocked
+		score := 0.0
+		var symbols []spam.Symbol
+		if s.spamScorer != nil {
+			scoreCtx, cancel := context.WithTimeout(ctx, spamScoreTimeout)
+			result := s.spamScorer.Score(scoreCtx, spam.Input{
+				FromAddress:    input.FromAddress,
+				FromName:       input.FromName,
+				EnvelopeFrom:   input.EnvelopeFrom,
+				Subject:        input.Subject,
+				Body:           input.Body,
+				ContentType:    input.ContentType,
+				Authentication: input.Authentication,
+				IsBlocked:      isBlocked,
+			})
+			cancel()
+			score, symbols = result.Score, result.Symbols
+			routedToSpam = isBlocked || score >= s.spamThreshold
+		} else if legacySpamPhraseMatch(input.Subject, input.Body) {
+			// No scorer configured: the historic behavior is preserved exactly.
+			routedToSpam = true
+		}
+		if routedToSpam {
+			email.Folder = folderSpam
+			now := time.Now()
+			email.SpamAt = &now
+		}
+		if s.spamScorer != nil {
+			email.Authentication = mergeAuthentication(input.Authentication, score, symbols)
+		}
 	}
 	email.RawSizeBytes = incomingRawSize(email, input)
 	if len(input.To) == 0 {
@@ -2442,6 +2486,16 @@ func (s *EmailService) MoveEmail(ctx context.Context, accountID uuid.UUID, id, f
 	if !validFolder(folder) {
 		return fmt.Errorf("invalid folder")
 	}
+	// The previous folder decides whether this move is a spam/ham training
+	// signal. A missing row falls through to the RowsAffected check below.
+	var current database.Email
+	if s.spamScorer != nil {
+		if err := s.db.WithContext(ctx).
+			Select("id", "folder", "subject", "body", "content_type", "from_address").
+			Where("id = ? AND account_id = ?", id, accountID).First(&current).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+	}
 	updates := map[string]any{"folder": folder}
 	now := time.Now()
 	switch folder {
@@ -2464,6 +2518,7 @@ func (s *EmailService) MoveEmail(ctx context.Context, accountID uuid.UUID, id, f
 			logging.Log.Warn().Err(err).Msg("publish mail move")
 		}
 	}
+	s.trainSpamFromMove(ctx, folder, current)
 	return nil
 }
 
@@ -2557,19 +2612,6 @@ func dereferenceString(value *string) string {
 		return ""
 	}
 	return *value
-}
-
-func (s *EmailService) shouldRouteToSpam(ctx context.Context, mailbox database.Mailbox, fromAddress, subject, body string) bool {
-	if s.isBlocked(ctx, mailbox, fromAddress) {
-		return true
-	}
-	text := strings.ToLower(subject + " " + body)
-	for _, phrase := range []string{"viagra", "bitcoin giveaway", "urgent wire transfer", "click here to claim"} {
-		if strings.Contains(text, phrase) {
-			return true
-		}
-	}
-	return false
 }
 
 func (s *EmailService) isBlocked(ctx context.Context, mailbox database.Mailbox, fromAddress string) bool {

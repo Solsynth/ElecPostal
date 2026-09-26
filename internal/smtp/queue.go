@@ -41,7 +41,7 @@ type deliveryJob struct {
 	TransientAttachments []service.IncomingAttachment             `json:"-"`
 }
 
-func newDeliveryJob(message parsedMessage, envelopeFrom string, recipients []recipient) deliveryJob {
+func newDeliveryJob(message parsedMessage, envelopeFrom string, recipients []recipient, authentication datatypes.JSON) deliveryJob {
 	job := deliveryJob{
 		ID: uuid.NewString(), MessageID: message.id, FromAddress: message.fromAddress,
 		FromName: message.fromName, Subject: message.subject, Body: message.body,
@@ -49,6 +49,7 @@ func newDeliveryJob(message parsedMessage, envelopeFrom string, recipients []rec
 		InReplyTo: message.inReplyTo, References: message.references,
 		To: message.to, Cc: message.cc,
 		Recipients: recipients, ReceivedAt: time.Now(), EnvelopeFrom: envelopeFrom,
+		Authentication: authentication,
 	}
 	for _, attachment := range message.attachments {
 		job.TransientAttachments = append(job.TransientAttachments, service.IncomingAttachment{

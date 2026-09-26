@@ -70,6 +70,24 @@ tlsMode = "starttls"       # direct-smtp: starttls or required; listener modes: 
 tlsHost = ""               # optional TLS server-name override
 tlsSkipVerify = false
 
+[mail.spam]
+# Inbound spam filter: SPF/DKIM/DMARC sender authentication, weighted content
+# and spoofing rules, and an optional global Bayes classifier. Mail whose
+# accumulated score reaches the threshold is filed into the Spam folder and
+# (when addXSpamHeader is set) carries X-Spam-Status/X-Spam-Score headers in
+# its stored source. Mail is never rejected at SMTP.
+enabled = true
+threshold = 5.0            # score at or above which a message is routed to Spam. A single auth failure (<= 1.5) is never enough on its own
+addXSpamHeader = true      # write X-Spam-Status/X-Spam-Score into the stored protocol source
+
+[mail.spam.bayes]
+# One global model for the whole deployment (stored in Redis under
+# "elecpostal:spam:bayes"). User spam/not-spam moves train and untrain it.
+# Bayes contributes nothing until both classes reach minLearns messages.
+enabled = true
+minLearns = 100            # per-class minimum trained messages before Bayes scores mail
+minTokens = 11             # minimum recognised tokens before a Bayes verdict is trusted
+
 [[mail.smtp]]
 enabled = true
 host = ""

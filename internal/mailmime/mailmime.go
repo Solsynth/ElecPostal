@@ -20,10 +20,19 @@ const ManifestVersion = 1
 // Manifest is the durable, attachment-free description of a message's MIME
 // shape. Attachment bytes are addressed only by DysonFS file ID.
 type Manifest struct {
-	Version         int    `json:"version"`
-	BodyType        string `json:"body_type"`
-	OmitContentType bool   `json:"omit_content_type,omitempty"`
-	Parts           []Part `json:"parts"`
+	Version         int      `json:"version"`
+	BodyType        string   `json:"body_type"`
+	OmitContentType bool     `json:"omit_content_type,omitempty"`
+	Parts           []Part   `json:"parts"`
+	ExtraHeaders    []Header `json:"extra_headers,omitempty"`
+}
+
+// Header is an additional RFC 5322 header carried in the manifest so that a
+// stored message renders identically every time it is replayed (for example
+// the spam status headers). Names and values are sanitized on write.
+type Header struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 type Part struct {
@@ -196,6 +205,18 @@ func writeHeaders(source MessageSource, dst io.Writer) error {
 			if _, err := fmt.Fprintf(dst, "References: %s\r\n", strings.Join(ids, " ")); err != nil {
 				return err
 			}
+		}
+	}
+	// Manifest extras (e.g. X-Spam-Status) come last so the injected header
+	// block stays adjacent to the terminating blank line and the message body
+	// is never mistaken for a header.
+	for _, header := range source.Manifest.ExtraHeaders {
+		name := strings.TrimSpace(cleanHeader(header.Name))
+		if name == "" {
+			continue
+		}
+		if _, err := fmt.Fprintf(dst, "%s: %s\r\n", name, cleanHeader(header.Value)); err != nil {
+			return err
 		}
 	}
 	return nil

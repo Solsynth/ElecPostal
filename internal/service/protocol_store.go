@@ -690,6 +690,7 @@ func (s *EmailService) storeProtocolSourceTx(tx *gorm.DB, email *database.Email,
 		manifest.Parts = append(manifest.Parts, part)
 		attachmentParts[id] = part
 	}
+	s.applySpamManifestHeaders(&manifest, email)
 	manifestBytes, err := json.Marshal(manifest)
 	if err != nil {
 		return err

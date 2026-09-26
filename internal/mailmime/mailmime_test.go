@@ -260,3 +260,82 @@ func TestRenderOmitsThreadingHeadersWhenAbsent(t *testing.T) {
 		}
 	}
 }
+
+// TestRenderWritesManifestExtraHeaders: manifest extras are emitted after the
+// standard headers, are readable by a mail client, and Count accounts for
+// their bytes.
+func TestRenderWritesManifestExtraHeaders(t *testing.T) {
+	source := MessageSource{
+		FromAddress: "sender@example.test", Subject: "spam", Body: "body", BodyType: "text/plain",
+		Manifest: Manifest{
+			Version: ManifestVersion, BodyType: "text/plain",
+			ExtraHeaders: []Header{
+				{Name: "X-Spam-Status", Value: "Yes"},
+				{Name: "X-Spam-Score", Value: "7.25"},
+			},
+		},
+	}
+	rendered, err := RenderBytes(context.Background(), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := mail.ReadMessage(bytes.NewReader(rendered))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := message.Header.Get("X-Spam-Status"); got != "Yes" {
+		t.Fatalf("X-Spam-Status = %q, want Yes", got)
+	}
+	if got := message.Header.Get("X-Spam-Score"); got != "7.25" {
+		t.Fatalf("X-Spam-Score = %q, want 7.25", got)
+	}
+	// The extras land after the standard header block and before the body's
+	// Content-Type line, i.e. still inside the message header block.
+	mimeVersion := bytes.Index(rendered, []byte("MIME-Version: 1.0"))
+	contentType := bytes.Index(rendered, []byte("Content-Type: text/plain"))
+	spamStatus := bytes.Index(rendered, []byte("X-Spam-Status: Yes"))
+	if mimeVersion < 0 || contentType < 0 || spamStatus < mimeVersion || spamStatus > contentType {
+		t.Fatalf("extra header not emitted after the standard headers: %q", rendered)
+	}
+	if blankLine := bytes.Index(rendered, []byte("\r\n\r\n")); blankLine < spamStatus {
+		t.Fatalf("extra header emitted past the header block: %q", rendered)
+	}
+
+	// An empty Name is skipped; a CRLF in a value cannot forge a header.
+	rendered, err = RenderBytes(context.Background(), MessageSource{
+		Body: "body", BodyType: "text/plain",
+		Manifest: Manifest{Version: ManifestVersion, BodyType: "text/plain", ExtraHeaders: []Header{
+			{Name: "  ", Value: "ignored"},
+			{Name: "X-Test", Value: "a\r\nX-Forged: yes"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mail.ReadMessage(bytes.NewReader(rendered)); err != nil {
+		t.Fatal(err)
+	}
+	message, err = mail.ReadMessage(bytes.NewReader(rendered))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := message.Header.Get("X-Forged"); got != "" {
+		t.Fatalf("header injection succeeded: X-Forged = %q", got)
+	}
+
+	// Count must include the extra headers so WireSizeBytes matches Render.
+	withExtras := source
+	withoutExtras := source
+	withoutExtras.Manifest.ExtraHeaders = nil
+	countWith, err := Count(context.Background(), withExtras)
+	if err != nil {
+		t.Fatal(err)
+	}
+	countWithout, err := Count(context.Background(), withoutExtras)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countWith <= countWithout {
+		t.Fatalf("Count with extras = %d, without = %d; extras not counted", countWith, countWithout)
+	}
+}

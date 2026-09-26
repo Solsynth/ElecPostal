@@ -33,6 +33,7 @@ Key settings:
 - `ring.target` (optional Ring gRPC endpoint for account notifications; pushes target the `dev.solsynth.solarwatt` app, are localized to the recipient's account language via `auth.target`, and surface the extracted verification code or key sentence instead of a leading excerpt)
 - `personality.target` (optional Persona gRPC endpoint for opt-in AI mail summaries; `personality.agent` names the summarizing agent. Summaries are stored on the message, used as its list preview, and metered by Persona against the account's own usage limits and billing)
 - `mail.domain` (canonical mail domain; local-only mailbox addresses are completed with this domain before outbound delivery and exposed via `GET /api/mail/host`)
+- `mail.spam.*` (inbound spam filter: SPF/DKIM/DMARC sender authentication, weighted content rules, and an optional global Bayes classifier. `mail.spam.threshold` is the score at which mail is filed into Spam, `mail.spam.addXSpamHeader` writes `X-Spam-Status`/`X-Spam-Score` into the stored source, and `mail.spam.bayes.*` tunes the classifier that `redis.addr` backs. Mail is never rejected at SMTP)
 
 ## Attachments
 
