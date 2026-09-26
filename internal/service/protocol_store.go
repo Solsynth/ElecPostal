@@ -16,6 +16,7 @@ import (
 
 	"src.solsynth.dev/sosys/elecpostal/internal/database"
 	"src.solsynth.dev/sosys/elecpostal/internal/filesystem"
+	"src.solsynth.dev/sosys/elecpostal/internal/logging"
 	"src.solsynth.dev/sosys/elecpostal/internal/mailmime"
 	"src.solsynth.dev/sosys/elecpostal/internal/mailtext"
 )
@@ -401,6 +402,77 @@ func (s *EmailService) MoveProtocolMessages(ctx context.Context, mailboxID, from
 		}
 		return tx.Save(&target).Error
 	})
+}
+
+// IsTrashFolderName reports whether a protocol folder name is the Trash
+// mailbox.
+func IsTrashFolderName(name string) bool {
+	return strings.EqualFold(strings.TrimSpace(name), "Trash")
+}
+
+// DeleteProtocolMessages handles a protocol client's delete for messages in
+// folderName: mail outside Trash is filed into Trash so the delete stays
+// recoverable, while mail already in Trash is deleted for good — which is what
+// an IMAP EXPUNGE or a JMAP destroy in Trash asks for.
+func (s *EmailService) DeleteProtocolMessages(ctx context.Context, mailboxID, folderName string, emailIDs []string) error {
+	if len(emailIDs) == 0 {
+		return nil
+	}
+	if IsTrashFolderName(folderName) {
+		return s.PurgeProtocolMessages(ctx, mailboxID, folderName, emailIDs)
+	}
+	return s.MoveProtocolMessages(ctx, mailboxID, folderName, "Trash", emailIDs)
+}
+
+// PurgeProtocolMessages permanently removes the listed messages from a
+// mailbox's protocol folder. It is how IMAP empties Trash: the messages and
+// their metadata go away for good, and DysonFS attachment bytes are dropped
+// once nothing else references them. IDs not in that folder are ignored, so a
+// stale client request cannot delete mail it never saw.
+func (s *EmailService) PurgeProtocolMessages(ctx context.Context, mailboxID, folderName string, emailIDs []string) error {
+	if len(emailIDs) == 0 {
+		return nil
+	}
+	var mailbox database.Mailbox
+	if err := s.db.WithContext(ctx).Where("id = ?", mailboxID).First(&mailbox).Error; err != nil {
+		return ErrNotFound
+	}
+	var folder database.MailFolder
+	if err := s.db.WithContext(ctx).Where("mailbox_id = ? AND name = ?", mailboxID, folderName).First(&folder).Error; err != nil {
+		return ErrNotFound
+	}
+	var memberships []database.FolderMessage
+	if err := s.db.WithContext(ctx).Where("folder_id = ? AND email_id IN ?", folder.ID, emailIDs).Find(&memberships).Error; err != nil {
+		return err
+	}
+	if len(memberships) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(memberships))
+	for _, membership := range memberships {
+		ids = append(ids, membership.EmailID)
+	}
+	var files []string
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		files = files[:0]
+		for _, id := range ids {
+			purged, purgeErr := s.purgeEmailRows(tx, id)
+			if purgeErr != nil {
+				return purgeErr
+			}
+			files = append(files, purged...)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	s.deleteUnreferencedAttachments(ctx, files)
+	if s.realtime != nil {
+		if err := s.realtime.Publish(ctx, mailbox.AccountID.String(), "mail.deleted", map[string]string{"mailbox_id": mailboxID, "reason": "purged"}); err != nil {
+			logging.Log.Warn().Err(err).Msg("publish purged protocol messages")
+		}
+	}
+	return nil
 }
 
 func (s *EmailService) CopyProtocolMessages(ctx context.Context, mailboxID, from, to string, emailIDs []string) error {

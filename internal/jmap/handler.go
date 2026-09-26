@@ -506,7 +506,9 @@ func (h *Handler) emailSet(c *gin.Context, owner uuid.UUID, accountID string, ar
 			notDestroyed[id] = gin.H{"type": "notFound"}
 			continue
 		}
-		if err := h.mail.MoveProtocolMessages(c.Request.Context(), accountID, cur.Folder.Name, "Trash", []string{id}); err != nil {
+		// Destroy keeps mail recoverable by filing it into Trash, except in
+		// Trash itself, which exists to be emptied.
+		if err := h.mail.DeleteProtocolMessages(c.Request.Context(), accountID, cur.Folder.Name, []string{id}); err != nil {
 			notDestroyed[id] = jmapError(err)
 			continue
 		}

@@ -22,6 +22,7 @@ func RegisterRoutes(r *gin.RouterGroup, emailSvc *service.EmailService) {
 		mailboxes.POST("", func(c *gin.Context) { createMailbox(c, emailSvc) })
 		mailboxes.GET("/:id/emails", func(c *gin.Context) { listMailboxEmails(c, emailSvc) })
 		mailboxes.GET("/:id/threads", func(c *gin.Context) { listThreads(c, emailSvc, c.Param("id")) })
+		mailboxes.DELETE("/:id/trash", func(c *gin.Context) { emptyMailboxTrash(c, emailSvc) })
 		mailboxes.GET("/:id/stats", func(c *gin.Context) { getMailboxStats(c, emailSvc) })
 		mailboxes.GET("/:id/quota", func(c *gin.Context) { getMailboxQuota(c, emailSvc) })
 		mailboxes.GET("/:id/aliases", func(c *gin.Context) { listMailboxAliases(c, emailSvc) })
@@ -47,6 +48,7 @@ func RegisterRoutes(r *gin.RouterGroup, emailSvc *service.EmailService) {
 		emails.GET("/:id/eml", func(c *gin.Context) { downloadEmailEML(c, emailSvc) })
 		emails.POST("/:id/resend", func(c *gin.Context) { resendEmail(c, emailSvc) })
 		emails.DELETE("/:id", func(c *gin.Context) { deleteEmail(c, emailSvc) })
+		emails.DELETE("/:id/permanent", func(c *gin.Context) { deleteEmailPermanently(c, emailSvc) })
 		emails.POST("/:id/read", func(c *gin.Context) { markRead(c, emailSvc, true) })
 		emails.POST("/:id/unread", func(c *gin.Context) { markRead(c, emailSvc, false) })
 		emails.POST("/:id/star", func(c *gin.Context) { markStarred(c, emailSvc, true) })
@@ -545,6 +547,37 @@ func deleteEmail(c *gin.Context, emailSvc *service.EmailService) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// deleteEmailPermanently drops a message and its metadata for good, DysonFS
+// attachment bytes included. It is the only way out of Trash.
+func deleteEmailPermanently(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+
+	if err := emailSvc.DeleteEmailPermanently(c.Request.Context(), uuid.MustParse(accountID), c.Param("id")); err != nil {
+		renderServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// emptyMailboxTrash permanently removes every message the mailbox keeps in
+// Trash and reports how many went away.
+func emptyMailboxTrash(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+
+	deleted, err := emailSvc.EmptyTrash(c.Request.Context(), uuid.MustParse(accountID), c.Param("id"))
+	if err != nil {
+		renderServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"deleted": deleted})
 }
 
 func markRead(c *gin.Context, emailSvc *service.EmailService, isRead bool) {

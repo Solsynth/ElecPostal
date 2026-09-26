@@ -2466,8 +2466,9 @@ func (s *EmailService) resolveAttachmentReferences(ctx context.Context, mailbox 
 	return references, nil
 }
 
-// DeleteEmail moves a message to Trash. Permanent deletion remains reserved for
-// the retention worker so users can recover accidental deletes.
+// DeleteEmail moves a message to Trash. Deleting a message for good is a
+// separate, explicit call (see DeleteEmailPermanently) so an accidental delete
+// stays recoverable.
 func (s *EmailService) DeleteEmail(ctx context.Context, accountID uuid.UUID, id string) error {
 	now := time.Now()
 	result := s.db.WithContext(ctx).Model(&database.Email{}).Where("id = ? AND account_id = ?", id, accountID).Updates(map[string]any{"folder": folderTrash, "trashed_at": now})
@@ -2478,6 +2479,168 @@ func (s *EmailService) DeleteEmail(ctx context.Context, accountID uuid.UUID, id 
 		return ErrNotFound
 	}
 	return nil
+}
+
+// DeleteEmailPermanently removes a message and everything that exists only for
+// it: the row, its recipients, attachment manifest, label mappings, protocol
+// source, folder membership, and DMARC intake reports. Attachment bytes are
+// dropped from DysonFS once no other message references them.
+func (s *EmailService) DeleteEmailPermanently(ctx context.Context, accountID uuid.UUID, id string) error {
+	var email database.Email
+	if err := s.db.WithContext(ctx).Where("id = ? AND account_id = ?", id, accountID).First(&email).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrNotFound
+		}
+		return err
+	}
+	var files []string
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		purged, err := s.purgeEmailRows(tx, email.ID)
+		files = purged
+		return err
+	}); err != nil {
+		return err
+	}
+	s.deleteUnreferencedAttachments(ctx, files)
+	s.publishMailEvent(ctx, accountID.String(), "mail.deleted", &email)
+	return nil
+}
+
+// EmptyTrash permanently removes every message a mailbox keeps in Trash and
+// reports how many it removed. The whole sweep runs in one transaction, so a
+// failure leaves Trash exactly as it was.
+func (s *EmailService) EmptyTrash(ctx context.Context, accountID uuid.UUID, mailboxID string) (int64, error) {
+	mailbox, err := s.authorizedMailbox(ctx, accountID, mailboxID)
+	if err != nil {
+		return 0, err
+	}
+	var ids []string
+	if err := s.db.WithContext(ctx).Model(&database.Email{}).
+		Where("account_id = ? AND mailbox_id = ? AND folder = ? AND archived_at IS NULL", accountID, mailbox.ID, folderTrash).
+		Pluck("id", &ids).Error; err != nil {
+		return 0, err
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	var files []string
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		files = files[:0]
+		for _, id := range ids {
+			purged, purgeErr := s.purgeEmailRows(tx, id)
+			if purgeErr != nil {
+				return purgeErr
+			}
+			files = append(files, purged...)
+		}
+		return nil
+	}); err != nil {
+		return 0, err
+	}
+	s.deleteUnreferencedAttachments(ctx, files)
+	if s.realtime != nil {
+		if err := s.realtime.Publish(ctx, accountID.String(), "mail.deleted", map[string]string{"mailbox_id": mailbox.ID, "reason": "trash_emptied"}); err != nil {
+			logging.Log.Warn().Err(err).Msg("publish emptied trash")
+		}
+	}
+	return int64(len(ids)), nil
+}
+
+// purgeEmailRows permanently removes one message and every row that exists only
+// for it, inside the caller's transaction, and reports the DysonFS file ids its
+// attachments referenced. Child rows go first and the message row last, so
+// nothing is left pointing at a deleted message.
+func (s *EmailService) purgeEmailRows(tx *gorm.DB, emailID string) ([]string, error) {
+	var attachments []database.Attachment
+	if err := tx.Where("email_id = ?", emailID).Find(&attachments).Error; err != nil {
+		return nil, err
+	}
+	files := make([]string, 0, len(attachments))
+	for _, attachment := range attachments {
+		if id := attachmentFileID(attachment); id != "" {
+			files = append(files, id)
+		}
+	}
+	// DMARC intake reports hang off their source message and their evaluation
+	// rows hang off the report.
+	var reports []database.DmarcReport
+	if err := tx.Where("email_id = ?", emailID).Find(&reports).Error; err != nil {
+		return nil, err
+	}
+	for _, report := range reports {
+		if err := tx.Where("report_id = ?", report.ID).Delete(&database.DmarcReportRecord{}).Error; err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Where("email_id = ?", emailID).Delete(&database.DmarcReport{}).Error; err != nil {
+		return nil, err
+	}
+	if err := tx.Where("email_id = ?", emailID).Delete(&database.Recipient{}).Error; err != nil {
+		return nil, err
+	}
+	if err := tx.Where("email_id = ?", emailID).Delete(&database.Attachment{}).Error; err != nil {
+		return nil, err
+	}
+	if err := tx.Where("email_id = ?", emailID).Delete(&database.EmailLabelMapping{}).Error; err != nil {
+		return nil, err
+	}
+	if err := tx.Where("email_id = ?", emailID).Delete(&database.MessageSource{}).Error; err != nil {
+		return nil, err
+	}
+	var memberships []database.FolderMessage
+	if err := tx.Where("email_id = ?", emailID).Find(&memberships).Error; err != nil {
+		return nil, err
+	}
+	if len(memberships) > 0 {
+		folderIDs := make([]string, 0, len(memberships))
+		for _, membership := range memberships {
+			folderIDs = append(folderIDs, membership.FolderID)
+		}
+		if err := tx.Where("email_id = ?", emailID).Delete(&database.FolderMessage{}).Error; err != nil {
+			return nil, err
+		}
+		// CONDSTORE clients compare mod-sequences, so every folder that lost a
+		// message has to report a new one.
+		if err := tx.Model(&database.MailFolder{}).Where("id IN ?", folderIDs).UpdateColumn("highest_mod_seq", gorm.Expr("highest_mod_seq + 1")).Error; err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Unscoped().Delete(&database.Email{}, "id = ?", emailID).Error; err != nil {
+		return nil, err
+	}
+	return files, nil
+}
+
+// deleteUnreferencedAttachments drops DysonFS bytes for file ids no stored
+// attachment references any more. Attachment rows are already gone when this
+// runs, so a file another message still shares survives on its remaining row.
+func (s *EmailService) deleteUnreferencedAttachments(ctx context.Context, fileIDs []string) {
+	if s.files == nil {
+		return
+	}
+	seen := make(map[string]struct{}, len(fileIDs))
+	for _, id := range fileIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		var count int64
+		if err := s.db.WithContext(ctx).Model(&database.Attachment{}).
+			Where("storage_key = ? OR file ->> 'id' = ?", id, id).Count(&count).Error; err != nil {
+			logging.Log.Warn().Err(err).Str("file_id", id).Msg("check shared attachment reference")
+			continue
+		}
+		if count > 0 {
+			continue
+		}
+		if err := s.files.DeleteAttachment(ctx, id); err != nil {
+			logging.Log.Warn().Err(err).Str("file_id", id).Msg("failed to delete purged attachment")
+		}
+	}
 }
 
 // MoveEmail changes a message's mailbox folder and records the relevant state.
@@ -2640,58 +2803,19 @@ func (s *EmailService) PurgeArchivedEmails(ctx context.Context) (int64, error) {
 	var purgedIDs []string
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		for _, email := range emails {
-			var attachments []database.Attachment
-			if err := tx.Where("email_id = ?", email.ID).Find(&attachments).Error; err != nil {
-				return err
+			files, purgeErr := s.purgeEmailRows(tx, email.ID)
+			if purgeErr != nil {
+				return purgeErr
 			}
-			for _, attachment := range attachments {
-				if id := attachmentFileID(attachment); id != "" {
-					purgedIDs = append(purgedIDs, id)
-				}
-			}
-			if err := tx.Where("email_id = ?", email.ID).Delete(&database.Recipient{}).Error; err != nil {
-				return err
-			}
-			if err := tx.Where("email_id = ?", email.ID).Delete(&database.Attachment{}).Error; err != nil {
-				return err
-			}
-			if err := tx.Where("email_id = ?", email.ID).Delete(&database.EmailLabelMapping{}).Error; err != nil {
-				return err
-			}
-			result := tx.Unscoped().Delete(&database.Email{}, "id = ?", email.ID)
-			if result.Error != nil {
-				return result.Error
-			}
-			purged += result.RowsAffected
+			purgedIDs = append(purgedIDs, files...)
+			purged++
 		}
 		return nil
 	})
 	if err != nil {
 		return purged, err
 	}
-	seen := map[string]struct{}{}
-	for _, id := range purgedIDs {
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		seen[id] = struct{}{}
-		var references []database.Attachment
-		if queryErr := s.db.WithContext(ctx).Find(&references).Error; queryErr != nil {
-			logging.Log.Warn().Err(queryErr).Str("file_id", id).Msg("check shared attachment reference")
-			continue
-		}
-		count := int64(0)
-		for _, reference := range references {
-			if attachmentFileID(reference) == id {
-				count++
-			}
-		}
-		if count == 0 && s.files != nil {
-			if deleteErr := s.files.DeleteAttachment(ctx, id); deleteErr != nil {
-				logging.Log.Warn().Err(deleteErr).Str("file_id", id).Msg("failed to delete purged attachment")
-			}
-		}
-	}
+	s.deleteUnreferencedAttachments(ctx, purgedIDs)
 	return purged, nil
 }
 

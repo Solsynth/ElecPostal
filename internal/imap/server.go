@@ -34,6 +34,7 @@ type Backend interface {
 	OpenProtocolMessage(context.Context, string) (mailmime.MessageSource, error)
 	AppendProtocolMessage(context.Context, string, string, []byte, []string, time.Time) (uint32, uint64, error)
 	MoveProtocolMessages(context.Context, string, string, string, []string) error
+	DeleteProtocolMessages(context.Context, string, string, []string) error
 	CopyProtocolMessages(context.Context, string, string, string, []string) error
 	StoreProtocolFlags(context.Context, string, string, []string, []string, string, uint64) ([]service.ProtocolStoreResult, error)
 }
@@ -431,7 +432,9 @@ func (m *imapMailbox) Expunge() error {
 	if len(ids) == 0 {
 		return nil
 	}
-	return m.user.backend.MoveProtocolMessages(context.Background(), m.user.mailboxID, m.name, "Trash", ids)
+	// Flag-delete keeps mail recoverable by filing it into Trash, except in
+	// Trash itself, which exists to be emptied.
+	return m.user.backend.DeleteProtocolMessages(context.Background(), m.user.mailboxID, m.name, ids)
 }
 func (m *imapMailbox) transfer(uid bool, set *goimap.SeqSet, dest string, move bool) error {
 	msgs, _, err := m.messages()

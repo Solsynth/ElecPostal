@@ -544,6 +544,31 @@ Soft-deletes the email and returns:
 {"ok":true}
 ```
 
+### Delete an email permanently
+
+`DELETE /api/emails/{email-id}/permanent`
+
+Removes the message and everything that exists only for it — the row, its
+recipients, attachment manifest, tag mappings, protocol source, IMAP/JMAP
+folder membership, and DMARC intake reports — and drops its attachment bytes
+from DysonFS once no other message references them. Use it to empty Trash;
+it is irreversible.
+
+`DELETE /api/mailboxes/{mailbox-id}/trash` does the same for every message the
+mailbox keeps in Trash (archived messages awaiting retention stay untouched)
+and reports the count:
+
+```json
+{"deleted":4}
+```
+
+Both return `404 Not Found` for an email or mailbox the account does not own.
+
+Protocol clients reach the same behaviour: an IMAP `EXPUNGE` outside Trash files
+the flagged messages into Trash, while the same `EXPUNGE` inside Trash deletes
+them for good — which is what a mail client's "Empty Trash" issues. JMAP
+`Email/set` `destroy` follows the same rule.
+
 ## Delivery behavior
 
 When an outbound adapter is configured, non-draft messages are delivered to the
@@ -564,7 +589,8 @@ Both return `{"ok":true}`.
 ### Folders and spam
 
 New inbound mail arrives in `inbox`; sent messages and drafts are stored in
-`sent` and `drafts`. `DELETE /api/emails/{email-id}` moves a message to Trash.
+`sent` and `drafts`. `DELETE /api/emails/{email-id}` moves a message to Trash,
+and `DELETE /api/emails/{email-id}/permanent` is the only way out of it.
 Move a message explicitly with `POST /api/emails/{email-id}/move`:
 
 ```json
