@@ -12,6 +12,17 @@ import (
 // content long before this limit.
 const textRuneLimit = 16384
 
+// Preview returns the text a listing shows for a message: the stored summary
+// when one was generated for it, otherwise a Summary of the body. A summary is
+// already written for a notification, so it is returned as-is rather than
+// cropped again.
+func Preview(summary, body, contentType string, maxRunes int) string {
+	if text := strings.TrimSpace(summary); text != "" {
+		return text
+	}
+	return Summary(body, contentType, maxRunes)
+}
+
 // Text returns the readable text of a message body, HTML markup and non-content
 // elements removed, bounded by textRuneLimit runes. Unlike Summary it does not
 // stop at the leading characters, so callers can search the whole message.

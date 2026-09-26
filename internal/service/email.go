@@ -1246,9 +1246,7 @@ func (s *EmailService) ListThreads(ctx context.Context, accountID uuid.UUID, mai
 	}
 	items := make([]ThreadSummary, 0, end-start)
 	for _, id := range ordered[start:end] {
-		group := *groups[id]
-		group.LatestMessage.Body = mailtext.Summary(group.LatestMessage.Body, group.LatestMessage.ContentType, 256)
-		items = append(items, group)
+		items = append(items, *groups[id])
 	}
 	return items, total, nil
 
@@ -1991,9 +1989,14 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 	if err := s.enforceWorkspaceMailboxQuota(ctx, mailbox.WorkspaceID, mailboxLimit); err != nil {
 		return nil, err
 	}
-	if s.notifier != nil && email.Folder == folderInbox {
-		if err := s.notifier.SendEmailNotification(ctx, s.buildEmailNotification(ctx, &email)); err != nil {
-			logging.Log.Warn().Err(err).Str("account_id", mailbox.AccountID.String()).Msg("failed to send incoming email notification")
+	if email.Folder == folderInbox {
+		// Inbox mail is inspected even without a notifier: the insight also
+		// stores the summary that listings show as the message preview.
+		insight := s.inspectInboxEmail(ctx, &email)
+		if s.notifier != nil {
+			if err := s.notifier.SendEmailNotification(ctx, emailNotificationPayload(&email, insight)); err != nil {
+				logging.Log.Warn().Err(err).Str("account_id", mailbox.AccountID.String()).Msg("failed to send incoming email notification")
+			}
 		}
 	}
 	s.publishMailEvent(ctx, email.AccountID.String(), "mail.created", &email)

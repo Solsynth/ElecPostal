@@ -8,8 +8,6 @@ import (
 	"src.solsynth.dev/sosys/elecpostal/internal/account"
 	"src.solsynth.dev/sosys/elecpostal/internal/database"
 	"src.solsynth.dev/sosys/elecpostal/internal/logging"
-	"src.solsynth.dev/sosys/elecpostal/internal/mailintel"
-	"src.solsynth.dev/sosys/elecpostal/internal/mailtext"
 	"src.solsynth.dev/sosys/elecpostal/internal/personality"
 	"src.solsynth.dev/sosys/elecpostal/internal/ring"
 )
@@ -21,13 +19,14 @@ type UpdateNotificationSettingsInput struct {
 	Summarize *bool `json:"summarize"`
 }
 
-// SetAccountLanguageProvider enables localized notifications.
+// SetAccountLanguageProvider enables localized notifications and summaries.
 func (s *EmailService) SetAccountLanguageProvider(provider account.Provider) {
 	s.language = provider
 }
 
-// SetNotificationSummarizer enables personality-service summaries.
-func (s *EmailService) SetNotificationSummarizer(summarizer personality.Summarizer) {
+// SetSummarizer enables personality-service summaries. They back both the
+// notification subtitle and the stored message preview.
+func (s *EmailService) SetSummarizer(summarizer personality.Summarizer) {
 	s.summarizer = summarizer
 }
 
@@ -81,75 +80,30 @@ func (s *EmailService) notificationPreferences(ctx context.Context, accountID uu
 	return settings
 }
 
-// buildEmailNotification decides what a new message's notification says.
-//
-// Message analysis always runs, even when the account turned highlighting off:
-// it is what keeps verification codes and security events away from the
-// personality service, which only ever sees messages our own rules found
-// nothing in.
-func (s *EmailService) buildEmailNotification(ctx context.Context, email *database.Email) ring.EmailNotification {
-	language := s.notificationLanguage(ctx, email.AccountID)
-	preferences := s.notificationPreferences(ctx, email.AccountID)
-	analysis := mailintel.Analyze(email.Subject, email.Body, email.ContentType)
-
-	notification := ring.EmailNotification{
-		AccountID: email.AccountID.String(),
-		EmailID:   email.ID,
-		Language:  language,
-		Subject:   email.Subject,
-		FromName:  email.FromName,
-	}
-	if preferences.Highlight {
-		notification.Highlight = analysis
-	}
-	if analysis.Kind == mailintel.KindNone && preferences.Summarize {
-		notification.Summary = s.summarizeForNotification(ctx, email, language)
-	}
-	return notification
-}
-
-// notificationLanguage resolves the recipient's language, degrading to the
-// default locale when the account service cannot answer.
-func (s *EmailService) notificationLanguage(ctx context.Context, accountID uuid.UUID) string {
+// accountLanguage resolves the recipient's language, degrading to the default
+// locale when the account service cannot answer.
+func (s *EmailService) accountLanguage(ctx context.Context, accountID uuid.UUID) string {
 	if s.language == nil {
 		return ""
 	}
 	language, err := s.language.Language(ctx, accountID.String())
 	if err != nil {
-		logging.Log.Warn().Err(err).Str("account_id", accountID.String()).Msg("failed to resolve notification language")
+		logging.Log.Warn().Err(err).Str("account_id", accountID.String()).Msg("failed to resolve account language")
 		return ""
 	}
 	return language
 }
 
-// summarizeForNotification asks the personality service for a summary and
-// stores it on the message. Every quota decision belongs to the Personality
-// service: it meters these calls against the account's own usage limits and
-// billing, so a refusal simply leaves the notification on its subject fallback.
-func (s *EmailService) summarizeForNotification(ctx context.Context, email *database.Email, language string) string {
-	if s.summarizer == nil {
-		return ""
-	}
-	summary, err := s.summarizer.Summarize(ctx, personality.SummaryRequest{
+// emailNotificationPayload maps a delivered message and its insight onto the
+// push Ring delivers.
+func emailNotificationPayload(email *database.Email, insight mailInsight) ring.EmailNotification {
+	return ring.EmailNotification{
 		AccountID: email.AccountID.String(),
-		Language:  language,
-		FromName:  email.FromName,
+		EmailID:   email.ID,
+		Language:  insight.Language,
 		Subject:   email.Subject,
-		Body:      mailtext.Text(email.Body, email.ContentType),
-	})
-	if err != nil {
-		event := logging.Log.Debug()
-		message := "skipping notification summary"
-		if !personality.IsAccessRejection(err) {
-			event = logging.Log.Warn()
-			message = "failed to summarize incoming email"
-		}
-		event.Err(err).Str("account_id", email.AccountID.String()).Str("email_id", email.ID).Msg(message)
-		return ""
+		FromName:  email.FromName,
+		Highlight: insight.Highlight,
+		Summary:   insight.Summary,
 	}
-	if err := s.db.WithContext(ctx).Model(&database.Email{}).Where("id = ?", email.ID).Update("summary", summary).Error; err != nil {
-		// The notification is still worth sending with the summary we have.
-		logging.Log.Warn().Err(err).Str("email_id", email.ID).Msg("failed to store notification summary")
-	}
-	return summary
 }

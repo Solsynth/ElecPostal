@@ -135,6 +135,10 @@ tlsSkipVerify = false
 # are only requested for messages our own rules found no verification code,
 # security event, or action request in, so credentials never reach the agent.
 #
+# Summaries are generated as mail is delivered, not only when Ring is
+# configured: they are stored on the message and used as its list preview
+# (GET /api/emails, JMAP preview) as well as the notification subtitle.
+#
 # Each summary is a normal Personality completion: it is metered against the
 # mailbox owner's own Personality usage limits and billing, so the per-account
 # quota lives in Persona's [billing] configuration, not here. Leave Persona's

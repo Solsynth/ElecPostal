@@ -14,3 +14,15 @@ func TestSummaryKeepsPlainTextAndBoundsByRunes(t *testing.T) {
 		t.Fatalf("Summary() = %q, want bounded plain text", got)
 	}
 }
+
+func TestPreviewPrefersTheStoredSummary(t *testing.T) {
+	if got := Preview("Agent summary", `<p>Body text</p>`, "text/html", 100); got != "Agent summary" {
+		t.Fatalf("Preview() = %q, want the stored summary", got)
+	}
+	if got := Preview("   ", "Body text", "text/plain", 100); got != "Body text" {
+		t.Fatalf("Preview() = %q, want the body preview for a blank summary", got)
+	}
+	if got := Preview("", `<p>Body <b>text</b></p>`, "text/html", 4); got != "Body" {
+		t.Fatalf("Preview() = %q, want the bounded body preview", got)
+	}
+}

@@ -56,23 +56,30 @@ func New(cfg *config.Config) (*App, error) {
 		return nil, err
 	}
 
-	var notifier *ring.Client
+	// The notifier stays a nil interface when Ring is not configured: a typed
+	// nil *ring.Client stored in the interface would compare as non-nil and
+	// panic on the first delivery.
+	var notifier service.NotificationSender
 	if cfg.Ring.Target != "" {
-		notifier, err = ring.NewClient(cfg.Ring.Target, cfg.Ring.UseTLS, cfg.Ring.TLSSkipVerify)
+		client, err := ring.NewClient(cfg.Ring.Target, cfg.Ring.UseTLS, cfg.Ring.TLSSkipVerify)
 		if err != nil {
 			return nil, err
 		}
+		notifier = client
 	}
 
 	emailSvc := service.NewEmailService(db, notifier)
-	if cfg.Ring.Target != "" {
+	// Incoming mail is enriched for notifications and for list previews alike,
+	// so the language provider and summarizer follow the personality and ring
+	// configuration rather than the notifier alone.
+	if cfg.Ring.Target != "" || cfg.Personality.Target != "" {
 		if cfg.Auth.Target != "" {
 			accountClient, err := account.NewClient(cfg.Auth.Target, cfg.Auth.UseTLS, cfg.Auth.TLSSkipVerify)
 			if err != nil {
 				return nil, err
 			}
 			emailSvc.SetAccountLanguageProvider(accountClient)
-			logging.Log.Info().Str("target", cfg.Auth.Target).Msg("notification localization account provider configured")
+			logging.Log.Info().Str("target", cfg.Auth.Target).Msg("account language provider configured")
 		}
 		if cfg.Personality.Target != "" {
 			summarizer, err := personality.NewClient(personality.Config{
@@ -86,11 +93,11 @@ func New(cfg *config.Config) (*App, error) {
 			if err != nil {
 				return nil, err
 			}
-			emailSvc.SetNotificationSummarizer(summarizer)
+			emailSvc.SetSummarizer(summarizer)
 			logging.Log.Info().
 				Str("target", cfg.Personality.Target).
 				Str("agent", cfg.Personality.Agent).
-				Msg("notification summarizer configured")
+				Msg("email summarizer configured")
 		}
 	}
 	var fileClient *filesystem.Client

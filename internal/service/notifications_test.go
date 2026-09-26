@@ -78,6 +78,7 @@ func newNotificationFixture(t *testing.T) notificationFixture {
 		&database.Mailbox{}, &database.MailboxAlias{}, &database.MailForwarding{}, &database.Email{}, &database.Recipient{}, &database.Attachment{},
 		&database.MessageSource{}, &database.MailBlockRule{}, &database.MailFolder{}, &database.FolderMessage{},
 		&database.AccountNotificationSettings{}, &database.MailSendUsage{}, &database.MailOutbox{},
+		&database.DmarcReport{}, &database.DmarcReportRecord{},
 	); err != nil {
 		t.Fatalf("AutoMigrate() error = %v", err)
 	}
@@ -87,7 +88,7 @@ func newNotificationFixture(t *testing.T) notificationFixture {
 	svc := NewEmailService(&database.DB{DB: db}, notifier)
 	svc.SetWorkspaceProvider(fakeWorkspaceProvider{})
 	svc.SetAccountLanguageProvider(fakeLanguageProvider{language: "zh-CN"})
-	svc.SetNotificationSummarizer(summarizer)
+	svc.SetSummarizer(summarizer)
 	svc.SetDomain("example.com")
 
 	accountID := uuid.New()
@@ -263,6 +264,17 @@ func TestNotificationSettingsDefaultAndUpdate(t *testing.T) {
 	}
 }
 
+// notifierEmailID returns the id of the message the fixture delivered under
+// this subject.
+func (f notificationFixture) notifierEmailID(t *testing.T, subject string) string {
+	t.Helper()
+	var email database.Email
+	if err := f.db.Where("subject = ?", subject).First(&email).Error; err != nil {
+		t.Fatalf("load email %q: %v", subject, err)
+	}
+	return email.ID
+}
+
 func boolPtr(value bool) *bool { return &value }
 
 func TestNotifySummarizerRefusalsAreNotWarnings(t *testing.T) {
@@ -274,7 +286,7 @@ func TestNotifySummarizerRefusalsAreNotWarnings(t *testing.T) {
 	}{
 		"quota refusal is quiet": {
 			err:  status.Error(codes.ResourceExhausted, "Personality usage threshold exceeded"),
-			want: "skipping notification summary",
+			want: "skipping email summary",
 		},
 		"service failure warns": {
 			err:  status.Error(codes.Unavailable, "personality service unavailable"),
@@ -300,5 +312,123 @@ func TestNotifySummarizerRefusalsAreNotWarnings(t *testing.T) {
 				t.Fatalf("logs = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestListEmailsAndGetEmailExposeTheStoredSummary(t *testing.T) {
+	f := newNotificationFixture(t)
+	ctx := context.Background()
+	if _, err := f.svc.UpdateNotificationSettings(ctx, f.accountID, UpdateNotificationSettingsInput{
+		Summarize: boolPtr(true),
+	}); err != nil {
+		t.Fatalf("UpdateNotificationSettings() error = %v", err)
+	}
+	f.receive(t, "This week at Acme", "Hello Ada, here is everything that shipped this week.")
+
+	// A message delivered after the account turned summaries off keeps the
+	// leading-text preview.
+	if _, err := f.svc.UpdateNotificationSettings(ctx, f.accountID, UpdateNotificationSettingsInput{
+		Summarize: boolPtr(false),
+	}); err != nil {
+		t.Fatalf("UpdateNotificationSettings() error = %v", err)
+	}
+	f.receive(t, "Lunch?", "see you at noon")
+
+	items, total, err := f.svc.ListEmails(ctx, f.accountID, f.mailbox.ID, ListInput{Take: 10})
+	if err != nil {
+		t.Fatalf("ListEmails() error = %v", err)
+	}
+	if total != 2 || len(items) != 2 {
+		t.Fatalf("listed = %d/%d, want 2", len(items), total)
+	}
+	previews := map[string]string{}
+	presence := map[string]string{}
+	for _, item := range items {
+		previews[item.Subject] = item.Body
+		presence[item.Subject] = item.Summary
+	}
+	if got := previews["This week at Acme"]; got != "Acme shipped three features" {
+		t.Fatalf("summarized preview = %q, want the stored summary", got)
+	}
+	if got := previews["Lunch?"]; got != "see you at noon" {
+		t.Fatalf("unsummarized preview = %q, want the body text", got)
+	}
+	if got := presence["This week at Acme"]; got != "Acme shipped three features" {
+		t.Fatalf("summary field = %q, want the stored summary", got)
+	}
+
+	// The single-message API carries the same summary next to the full body.
+	fetched, err := f.svc.GetEmail(ctx, f.accountID, f.notifierEmailID(t, "This week at Acme"))
+	if err != nil {
+		t.Fatalf("GetEmail() error = %v", err)
+	}
+	if fetched.Summary != "Acme shipped three features" {
+		t.Fatalf("GetEmail().Summary = %q", fetched.Summary)
+	}
+	if !strings.Contains(fetched.Body, "everything that shipped this week") {
+		t.Fatalf("GetEmail().Body = %q, want the complete body", fetched.Body)
+	}
+}
+
+func TestInboxMailIsSummarizedWithoutANotifier(t *testing.T) {
+	f := newNotificationFixture(t)
+	ctx := context.Background()
+
+	// A deployment with no Ring still stores summaries: they back list previews.
+	svc := NewEmailService(&database.DB{DB: f.db}, nil)
+	svc.SetWorkspaceProvider(fakeWorkspaceProvider{})
+	svc.SetSummarizer(f.summarizer)
+	svc.SetDomain("example.com")
+	if _, err := svc.UpdateNotificationSettings(ctx, f.accountID, UpdateNotificationSettingsInput{
+		Summarize: boolPtr(true),
+	}); err != nil {
+		t.Fatalf("UpdateNotificationSettings() error = %v", err)
+	}
+	if _, err := svc.ReceiveEmail(ctx, ReceiveEmailInput{
+		MailboxID:   f.mailbox.ID,
+		FromAddress: "sender@remote.example",
+		FromName:    "Acme",
+		Subject:     "This week at Acme",
+		Body:        "Hello Ada, here is everything that shipped this week.",
+		ContentType: "text/plain",
+	}); err != nil {
+		t.Fatalf("ReceiveEmail() error = %v", err)
+	}
+	if len(f.summarizer.requests) != 1 {
+		t.Fatalf("summaries requested = %d, want 1 without a notifier", len(f.summarizer.requests))
+	}
+	if len(f.notifier.sent) != 0 {
+		t.Fatalf("notifications sent = %d, want none without a notifier", len(f.notifier.sent))
+	}
+	var stored database.Email
+	if err := f.db.Where("subject = ?", "This week at Acme").First(&stored).Error; err != nil {
+		t.Fatalf("load email: %v", err)
+	}
+	if stored.Summary != "Acme shipped three features" {
+		t.Fatalf("stored summary = %q, want it persisted", stored.Summary)
+	}
+}
+
+func TestDmarcReportsAreNeverSummarized(t *testing.T) {
+	f := newNotificationFixture(t)
+	if _, err := f.svc.UpdateNotificationSettings(context.Background(), f.accountID, UpdateNotificationSettingsInput{
+		Summarize: boolPtr(true),
+	}); err != nil {
+		t.Fatalf("UpdateNotificationSettings() error = %v", err)
+	}
+	if _, err := f.svc.ReceiveEmail(context.Background(), ReceiveEmailInput{
+		MailboxID:   f.mailbox.ID,
+		FromAddress: "noreply-dmarc-support@example.net",
+		FromName:    "DMARC",
+		Subject:     "Report Domain: acme.example Submitter: example.net",
+		Body:        "<report_metadata><org_name>example.net</org_name></report_metadata>",
+		ContentType: "text/plain",
+		DmarcIntake: true,
+		DeliveredTo: []string{"dmarc@example.com"},
+	}); err != nil {
+		t.Fatalf("ReceiveEmail() error = %v", err)
+	}
+	if len(f.summarizer.requests) != 0 {
+		t.Fatalf("summaries requested = %d, want none for a DMARC report", len(f.summarizer.requests))
 	}
 }

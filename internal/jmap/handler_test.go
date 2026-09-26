@@ -446,3 +446,20 @@ func TestMailboxPatch(t *testing.T) {
 		t.Fatalf("expected empty, got %s", id)
 	}
 }
+
+func TestEmailObjectPreviewUsesTheStoredSummary(t *testing.T) {
+	thread := "thread-preview"
+	result := emailObject(mailRow{
+		Email: database.Email{
+			ID: "email-preview", ThreadID: &thread, Subject: "This week at Acme",
+			Body:        `<html><body><p>Hello Ada, here is everything that shipped this week.</p></body></html>`,
+			ContentType: "text/html",
+			Summary:     "Acme shipped three features this week",
+			FromAddress: "hello@acme.example", CreatedAt: time.Now(),
+		},
+		Folder: database.MailFolder{ID: "inbox"}, Flags: []string{},
+	})
+	if got := result["preview"]; got != "Acme shipped three features this week" {
+		t.Fatalf("preview = %v, want the stored summary", got)
+	}
+}

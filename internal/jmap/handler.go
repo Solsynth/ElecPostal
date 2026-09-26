@@ -1108,7 +1108,7 @@ func emailObject(r mailRow) gin.H {
 		}
 		return out
 	}
-	preview := mailtext.Summary(r.Email.Body, r.Email.ContentType, 256)
+	preview := mailtext.Preview(r.Email.Summary, r.Email.Body, r.Email.ContentType, 256)
 	sentAt := r.Email.CreatedAt
 	if r.Email.SentAt != nil {
 		sentAt = *r.Email.SentAt

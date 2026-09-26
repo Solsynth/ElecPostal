@@ -340,12 +340,13 @@ needed:
 | `to` | Case-insensitive match against a recipient name or address. |
 | `has_attachments` | `true` for messages with attachments, `false` for messages without. |
 
-List responses use `body` as a plain-text preview capped at 256 Unicode
-characters. HTML markup and embedded style/script content are omitted. The full
-message body remains available from `GET /api/emails/{email-id}`.
-
-Messages summarized for notifications also carry `summary`, the one-line
-personality-service summary. It is empty for every other message.
+List responses use `body` as the message preview. When the account generated a
+personality-service summary for the message, `body` is that summary; otherwise
+it is plain text capped at 256 Unicode characters with HTML markup and embedded
+style/script content omitted. The full message body remains available from
+`GET /api/emails/{email-id}`, and `summary` always carries the generated summary
+on its own (empty for messages without one). The JMAP `preview` property
+follows the same rule.
 
 
 For filter counts and navigation badges, use `GET /api/emails/stats` or
@@ -589,10 +590,12 @@ instead of the subject. `meta.kind` carries `code`, `security`, or `action` for
 clients that want to style or route the push, and `meta` always carries
 `email_id`. Messages where nothing stands out keep the subject as the subtitle.
 
-When `personality.target` is configured and an account enables summaries, a
-message that carries no code, security event, or action request is summarized by
-the configured personality agent. The summary becomes both the notification
-subtitle (with `meta.source` set to `summary`) and the email's `summary` field.
+When `personality.target` is configured and an account enables summaries, every
+delivered Inbox message that carries no code, security event, or action request
+is summarized by the configured personality agent as it arrives — no
+notification setup is required, because the summary is stored on the message
+(`summary`) and used as its list preview. The notification then shows it as the
+subtitle with `meta.source` set to `summary`.
 
 Each summary is a regular Personality completion, so it is metered against the
 mailbox owner's own Personality usage limits and billing (`[billing]` in the
@@ -621,7 +624,8 @@ highlighting off.
 
 Preferences are stored per account, so every client of an account shares them.
 `highlight` defaults to `true` and switches code, security, and action
-extraction off; `summarize` defaults to `false` and opts into AI summaries.
+extraction off; `summarize` defaults to `false` and opts into AI summaries for
+both notifications and message previews.
 Accounts that never changed anything receive the defaults without a stored row.
 
 `PATCH /api/settings/notifications`
