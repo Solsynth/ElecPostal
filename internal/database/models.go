@@ -99,14 +99,14 @@ func (m *Mailbox) BeforeCreate(tx *gorm.DB) error {
 
 // Email stores a single email message.
 type Email struct {
-	ID                    string         `gorm:"primaryKey;size:36" json:"id"`
-	AccountID             uuid.UUID      `gorm:"index:idx_emails_account_id" json:"account_id"`
-	MailboxID             string         `gorm:"index:idx_emails_mailbox_id;size:36" json:"mailbox_id"`
-	ThreadID              *string        `gorm:"index:idx_emails_thread_id;size:36" json:"thread_id,omitempty"`
-	Subject               string         `gorm:"size:512" json:"subject"`
-	Body                  string         `gorm:"type:text" json:"body"`
-	FromAddress           string         `gorm:"size:255" json:"from_address"`
-	FromName              string         `gorm:"size:128" json:"from_name"`
+	ID          string    `gorm:"primaryKey;size:36" json:"id"`
+	AccountID   uuid.UUID `gorm:"index:idx_emails_account_id" json:"account_id"`
+	MailboxID   string    `gorm:"index:idx_emails_mailbox_id;size:36" json:"mailbox_id"`
+	ThreadID    *string   `gorm:"index:idx_emails_thread_id;size:36" json:"thread_id,omitempty"`
+	Subject     string    `gorm:"size:512" json:"subject"`
+	Body        string    `gorm:"type:text" json:"body"`
+	FromAddress string    `gorm:"size:255" json:"from_address"`
+	FromName    string    `gorm:"size:128" json:"from_name"`
 	// MessageID is the RFC 5322 Message-ID header value when present. It is the
 	// per-mailbox import dedupe key; NULL when the message had no Message-ID.
 	MessageID             *string        `gorm:"size:255" json:"message_id,omitempty"`
@@ -127,6 +127,10 @@ type Email struct {
 	DeliveryError         *string        `gorm:"type:text" json:"delivery_error,omitempty"`
 	ProviderMessageID     *string        `gorm:"size:255" json:"provider_message_id,omitempty"`
 	Authentication        datatypes.JSON `gorm:"type:jsonb" json:"authentication,omitempty"`
+	// Summary is the personality-service summary generated for notifications
+	// when the account enabled AI summaries. It is empty for every other
+	// message, including those whose content looked secret-bearing.
+	Summary string `gorm:"type:text" json:"summary,omitempty"`
 	// RawSizeBytes is the byte size of the message data kept in ElecPostal's
 	// database. Attachment content is stored and accounted for by DysonFS, so
 	// it is deliberately excluded from this value.
@@ -429,4 +433,27 @@ func (r *MailBlockRule) BeforeCreate(tx *gorm.DB) error {
 		r.ID = NewID()
 	}
 	return nil
+}
+
+// AccountNotificationSettings holds one account's incoming-mail notification
+// preferences. Accounts without a row fall back to DefaultNotificationSettings,
+// so enabling a flag for every existing account needs no backfill.
+type AccountNotificationSettings struct {
+	AccountID uuid.UUID `gorm:"primaryKey;size:36" json:"account_id"`
+	// Highlight replaces the notification subtitle with a verification code,
+	// security event, or action request extracted from the message.
+	Highlight bool `gorm:"not null" json:"highlight"`
+	// Summarize asks the personality service for a one-line summary when the
+	// message carries no code, security event, or action request.
+	Summarize bool      `gorm:"not null" json:"summarize"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// DefaultNotificationSettings returns the preferences applied to an account
+// that never changed them. Highlighting is on because it only picks a different
+// part of the same message; AI summaries are off because they send message
+// content to the personality service.
+func DefaultNotificationSettings(accountID uuid.UUID) AccountNotificationSettings {
+	return AccountNotificationSettings{AccountID: accountID, Highlight: true}
 }

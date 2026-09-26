@@ -3,7 +3,6 @@ package ring
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net"
 	"testing"
 
@@ -12,6 +11,7 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/types/known/emptypb"
 
+	"src.solsynth.dev/sosys/elecpostal/internal/mailintel"
 	gen "src.solsynth.dev/sosys/go/proto"
 )
 
@@ -25,19 +25,10 @@ func (f *fakeRingService) SendPushNotificationToUser(_ context.Context, req *gen
 	return &emptypb.Empty{}, nil
 }
 
-type fakeLanguageResolver struct {
-	language string
-	err      error
-}
-
-func (f *fakeLanguageResolver) Language(context.Context, string) (string, error) {
-	return f.language, f.err
-}
-
-func (f *fakeLanguageResolver) Close() error { return nil }
-
-func newTestClient(t *testing.T, service *fakeRingService) *Client {
+// send pushes one notification and returns what reached Ring.
+func send(t *testing.T, notification EmailNotification) *gen.DyPushNotification {
 	t.Helper()
+	service := &fakeRingService{}
 	listener := bufconn.Listen(1024 * 1024)
 	server := grpc.NewServer()
 	gen.RegisterDyRingServiceServer(server, service)
@@ -54,25 +45,31 @@ func newTestClient(t *testing.T, service *fakeRingService) *Client {
 		t.Fatalf("grpc.NewClient() error = %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	return &Client{conn: conn, client: gen.NewDyRingServiceClient(conn)}
-}
 
-func TestSendEmailNotificationTargetsSolWattApp(t *testing.T) {
-	service := &fakeRingService{}
-	client := newTestClient(t, service)
-	client.SetLanguageResolver(&fakeLanguageResolver{language: "en"})
-
-	err := client.SendEmailNotification(context.Background(), EmailNotification{
-		AccountID: "account-1", EmailID: "email-1", Subject: "Lunch?", FromName: "Ada Lovelace",
-		Body: "see you at noon", ContentType: "text/plain",
-	})
-	if err != nil {
+	client := &Client{conn: conn, client: gen.NewDyRingServiceClient(conn)}
+	if err := client.SendEmailNotification(context.Background(), notification); err != nil {
 		t.Fatalf("SendEmailNotification() error = %v", err)
 	}
 	if len(service.notifications) != 1 {
 		t.Fatalf("notifications sent = %d, want 1", len(service.notifications))
 	}
-	notification := service.notifications[0]
+	return service.notifications[0]
+}
+
+func metaOf(t *testing.T, notification *gen.DyPushNotification) map[string]string {
+	t.Helper()
+	meta := map[string]string{}
+	if err := json.Unmarshal(notification.GetMeta(), &meta); err != nil {
+		t.Fatalf("meta %s is not a JSON object: %v", notification.GetMeta(), err)
+	}
+	return meta
+}
+
+func TestSendEmailNotificationTargetsSolWattApp(t *testing.T) {
+	notification := send(t, EmailNotification{
+		AccountID: "account-1", EmailID: "email-1", Language: "en",
+		Subject: "Lunch?", FromName: "Ada Lovelace",
+	})
 	if got := notification.GetAppId(); got != AppID {
 		t.Fatalf("app_id = %q, want %q", got, AppID)
 	}
@@ -93,139 +90,78 @@ func TestSendEmailNotificationTargetsSolWattApp(t *testing.T) {
 	}
 }
 
-func TestSendEmailNotificationSurfacesVerificationCodes(t *testing.T) {
-	service := &fakeRingService{}
-	client := newTestClient(t, service)
-	client.SetLanguageResolver(&fakeLanguageResolver{language: "zh-CN"})
-
-	err := client.SendEmailNotification(context.Background(), EmailNotification{
-		AccountID: "account-1", EmailID: "email-1", Subject: "登录验证", FromName: "Acme",
-		Body:        "您好，\n您的验证码为 638415，请在 10 分钟内输入。\n如果这不是您本人操作，请忽略此邮件。",
-		ContentType: "text/plain",
+func TestSendEmailNotificationRendersHighlights(t *testing.T) {
+	notification := send(t, EmailNotification{
+		AccountID: "account-1", EmailID: "email-1", Language: "zh-CN",
+		Subject: "GitHub 登录验证", FromName: "GitHub",
+		Highlight: mailintel.Highlight{Kind: mailintel.KindCode, Text: "482913", Code: "482913"},
 	})
-	if err != nil {
-		t.Fatalf("SendEmailNotification() error = %v", err)
-	}
-	notification := service.notifications[0]
 	if got := notification.GetTitle(); got != "验证码" {
 		t.Fatalf("title = %q, want 验证码", got)
 	}
-	if got := notification.GetSubtitle(); got != "638415" {
-		t.Fatalf("subtitle = %q, want the code instead of the leading part", got)
+	if got := notification.GetSubtitle(); got != "482913" {
+		t.Fatalf("subtitle = %q, want the extracted code", got)
 	}
-	if got := notification.GetBody(); got != "来自 Acme" {
-		t.Fatalf("body = %q, want 来自 Acme", got)
+	if got := notification.GetBody(); got != "来自 GitHub" {
+		t.Fatalf("body = %q, want 来自 GitHub", got)
 	}
 	meta := metaOf(t, notification)
-	if meta["kind"] != "code" || meta["code"] != "638415" {
+	if meta["kind"] != "code" || meta["code"] != "482913" {
 		t.Fatalf("meta = %v, want the code and its kind", meta)
 	}
 }
 
-func TestSendEmailNotificationSurfacesTheImportantSentence(t *testing.T) {
-	service := &fakeRingService{}
-	client := newTestClient(t, service)
-	client.SetLanguageResolver(&fakeLanguageResolver{language: "en"})
-
-	err := client.SendEmailNotification(context.Background(), EmailNotification{
-		AccountID: "account-1", EmailID: "email-1", Subject: "Acme account notice", FromName: "Acme",
-		Body:        "Hello Ada,\n\nThanks for using Acme. Your password was changed on 2026-09-26.\nIf you did not do this, contact support. Unsubscribe from these emails.",
-		ContentType: "text/html",
+func TestSendEmailNotificationRendersSummaries(t *testing.T) {
+	notification := send(t, EmailNotification{
+		AccountID: "account-1", EmailID: "email-1", Language: "en",
+		Subject: "This week at Acme", FromName: "Acme",
+		Summary: "Acme shipped three new features and a price change",
 	})
-	if err != nil {
-		t.Fatalf("SendEmailNotification() error = %v", err)
+	if got := notification.GetTitle(); got != "New email" {
+		t.Fatalf("title = %q, want New email", got)
 	}
-	notification := service.notifications[0]
-	if got := notification.GetTitle(); got != "Security alert" {
-		t.Fatalf("title = %q, want Security alert", got)
+	if got := notification.GetSubtitle(); got != "Acme shipped three new features and a price change" {
+		t.Fatalf("subtitle = %q, want the summary", got)
 	}
-	if got := notification.GetSubtitle(); got != "Your password was changed on 2026-09-26" {
-		t.Fatalf("subtitle = %q, want the security sentence", got)
-	}
-	if got := metaOf(t, notification)["kind"]; got != "security" {
-		t.Fatalf("meta kind = %q, want security", got)
+	if got := metaOf(t, notification)["source"]; got != "summary" {
+		t.Fatalf("meta source = %q, want summary", got)
 	}
 }
 
-func TestSendEmailNotificationLocalizesRecipientLanguage(t *testing.T) {
-	service := &fakeRingService{}
-	client := newTestClient(t, service)
-	client.SetLanguageResolver(&fakeLanguageResolver{language: "zh-CN"})
-
-	err := client.SendEmailNotification(context.Background(), EmailNotification{
-		AccountID: "account-1", EmailID: "email-1", Subject: "午餐？", FromName: "艾达",
-		Body: "中午见", ContentType: "text/plain",
+func TestSendEmailNotificationPrefersHighlightOverSummary(t *testing.T) {
+	notification := send(t, EmailNotification{
+		AccountID: "account-1", EmailID: "email-1", Language: "en",
+		Subject:   "Sign in",
+		Highlight: mailintel.Highlight{Kind: mailintel.KindSecurity, Text: "Your password was changed"},
+		Summary:   "Acme sent a security notice",
 	})
-	if err != nil {
-		t.Fatalf("SendEmailNotification() error = %v", err)
+	if got := notification.GetSubtitle(); got != "Your password was changed" {
+		t.Fatalf("subtitle = %q, want the highlight", got)
 	}
-	notification := service.notifications[0]
-	if got := notification.GetTitle(); got != "新邮件" {
-		t.Fatalf("title = %q, want 新邮件", got)
+	meta := metaOf(t, notification)
+	if meta["kind"] != "security" {
+		t.Fatalf("meta = %v, want the security kind", meta)
 	}
-	if got := notification.GetBody(); got != "来自 艾达" {
-		t.Fatalf("body = %q, want 来自 艾达", got)
-	}
-}
-
-func TestSendEmailNotificationLocalizesEmptyFields(t *testing.T) {
-	service := &fakeRingService{}
-	client := newTestClient(t, service)
-	client.SetLanguageResolver(&fakeLanguageResolver{language: "zh-hans"})
-
-	err := client.SendEmailNotification(context.Background(), EmailNotification{
-		AccountID: "account-1", EmailID: "email-1", Subject: "  ", Body: "  ", ContentType: "text/plain",
-	})
-	if err != nil {
-		t.Fatalf("SendEmailNotification() error = %v", err)
-	}
-	notification := service.notifications[0]
-	if got := notification.GetSubtitle(); got != "（无主题）" {
-		t.Fatalf("subtitle = %q, want （无主题）", got)
-	}
-	if got := notification.GetBody(); got != "来自 新发件人" {
-		t.Fatalf("body = %q, want 来自 新发件人", got)
+	if _, ok := meta["source"]; ok {
+		t.Fatalf("meta = %v, want no summary source", meta)
 	}
 }
 
-func TestSendEmailNotificationFallsBackToEnglish(t *testing.T) {
-	for name, resolver := range map[string]LanguageResolver{
-		"no resolver":    nil,
-		"lookup failure": &fakeLanguageResolver{err: errors.New("account service unavailable")},
-		"unsupported":    &fakeLanguageResolver{language: "fr-FR"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			service := &fakeRingService{}
-			client := newTestClient(t, service)
-			if resolver != nil {
-				client.SetLanguageResolver(resolver)
-			}
-
-			err := client.SendEmailNotification(context.Background(), EmailNotification{
-				AccountID: "account-1", EmailID: "email-1", ContentType: "text/plain",
-			})
-			if err != nil {
-				t.Fatalf("SendEmailNotification() error = %v", err)
-			}
-			notification := service.notifications[0]
-			if got := notification.GetTitle(); got != "New email" {
-				t.Fatalf("title = %q, want New email", got)
-			}
-			if got := notification.GetSubtitle(); got != "(No subject)" {
-				t.Fatalf("subtitle = %q, want (No subject)", got)
-			}
-			if got := notification.GetBody(); got != "From New sender" {
-				t.Fatalf("body = %q, want From New sender", got)
-			}
-		})
+func TestSendEmailNotificationFallsBackToEnglishPlaceholders(t *testing.T) {
+	notification := send(t, EmailNotification{AccountID: "account-1", EmailID: "email-1", Language: "fr-FR"})
+	if got := notification.GetTitle(); got != "New email" {
+		t.Fatalf("title = %q, want New email", got)
+	}
+	if got := notification.GetSubtitle(); got != "(No subject)" {
+		t.Fatalf("subtitle = %q, want (No subject)", got)
+	}
+	if got := notification.GetBody(); got != "From New sender" {
+		t.Fatalf("body = %q, want From New sender", got)
 	}
 }
 
-func metaOf(t *testing.T, notification *gen.DyPushNotification) map[string]string {
-	t.Helper()
-	meta := map[string]string{}
-	if err := json.Unmarshal(notification.GetMeta(), &meta); err != nil {
-		t.Fatalf("meta %s is not a JSON object: %v", notification.GetMeta(), err)
+func TestSendEmailNotificationRejectsEmptyTarget(t *testing.T) {
+	if _, err := NewClient("  ", false, false); err == nil {
+		t.Fatal("NewClient() error = nil, want an error for an empty target")
 	}
-	return meta
 }

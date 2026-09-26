@@ -21,6 +21,12 @@ import (
 // mail pipeline.
 const languageLookupTimeout = 3 * time.Second
 
+// Provider resolves the preferred notification language of an account.
+type Provider interface {
+	Language(context.Context, string) (string, error)
+	Close() error
+}
+
 // Client reads accounts through Stargate's DyAccountService.
 type Client struct {
 	conn   *grpc.ClientConn

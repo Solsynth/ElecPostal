@@ -19,6 +19,7 @@ import (
 	"src.solsynth.dev/sosys/elecpostal/internal/grpcsvc"
 	"src.solsynth.dev/sosys/elecpostal/internal/imap"
 	"src.solsynth.dev/sosys/elecpostal/internal/logging"
+	"src.solsynth.dev/sosys/elecpostal/internal/personality"
 	"src.solsynth.dev/sosys/elecpostal/internal/pop3"
 	"src.solsynth.dev/sosys/elecpostal/internal/realtime"
 	"src.solsynth.dev/sosys/elecpostal/internal/relay"
@@ -61,17 +62,39 @@ func New(cfg *config.Config) (*App, error) {
 		if err != nil {
 			return nil, err
 		}
+	}
+
+	emailSvc := service.NewEmailService(db, notifier)
+	if cfg.Ring.Target != "" {
 		if cfg.Auth.Target != "" {
 			accountClient, err := account.NewClient(cfg.Auth.Target, cfg.Auth.UseTLS, cfg.Auth.TLSSkipVerify)
 			if err != nil {
 				return nil, err
 			}
-			notifier.SetLanguageResolver(accountClient)
+			emailSvc.SetAccountLanguageProvider(accountClient)
 			logging.Log.Info().Str("target", cfg.Auth.Target).Msg("notification localization account provider configured")
 		}
+		emailSvc.SetNotificationSummaryLimit(cfg.Personality.DailyLimit)
+		if cfg.Personality.Target != "" {
+			summarizer, err := personality.NewClient(personality.Config{
+				Target:        cfg.Personality.Target,
+				UseTLS:        cfg.Personality.UseTLS,
+				TLSSkipVerify: cfg.Personality.TLSSkipVerify,
+				Agent:         cfg.Personality.Agent,
+				Model:         cfg.Personality.Model,
+				Timeout:       time.Duration(cfg.Personality.TimeoutSeconds) * time.Second,
+			})
+			if err != nil {
+				return nil, err
+			}
+			emailSvc.SetNotificationSummarizer(summarizer)
+			logging.Log.Info().
+				Str("target", cfg.Personality.Target).
+				Str("agent", cfg.Personality.Agent).
+				Int("daily_limit", cfg.Personality.DailyLimit).
+				Msg("notification summarizer configured")
+		}
 	}
-
-	emailSvc := service.NewEmailService(db, notifier)
 	var fileClient *filesystem.Client
 	if cfg.FileSystem.Target != "" {
 		fileClient, err = filesystem.NewClient(cfg.FileSystem.Target, cfg.FileSystem.UseTLS, cfg.FileSystem.TLSSkipVerify)

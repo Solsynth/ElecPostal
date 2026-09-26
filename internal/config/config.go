@@ -9,19 +9,20 @@ import (
 )
 
 type Config struct {
-	App        AppConfig        `mapstructure:"app"`
-	HTTP       HTTPConfig       `mapstructure:"http"`
-	GRPC       GRPCConfig       `mapstructure:"grpc"`
-	Database   DatabaseConfig   `mapstructure:"database"`
-	Redis      RedisConfig      `mapstructure:"redis"`
-	NATS       NATSConfig       `mapstructure:"nats"`
-	Auth       AuthConfig       `mapstructure:"auth"`
-	FileSystem FileSystemConfig `mapstructure:"filesystem"`
-	Workspace  WorkspaceConfig  `mapstructure:"workspace"`
-	Mail       MailConfig       `mapstructure:"mail"`
-	Ring       RingConfig       `mapstructure:"ring"`
-	WebSocket  WebSocketConfig  `mapstructure:"websocket"`
-	Sentry     SentryConfig     `mapstructure:"sentry"`
+	App         AppConfig         `mapstructure:"app"`
+	HTTP        HTTPConfig        `mapstructure:"http"`
+	GRPC        GRPCConfig        `mapstructure:"grpc"`
+	Database    DatabaseConfig    `mapstructure:"database"`
+	Redis       RedisConfig       `mapstructure:"redis"`
+	NATS        NATSConfig        `mapstructure:"nats"`
+	Auth        AuthConfig        `mapstructure:"auth"`
+	FileSystem  FileSystemConfig  `mapstructure:"filesystem"`
+	Workspace   WorkspaceConfig   `mapstructure:"workspace"`
+	Mail        MailConfig        `mapstructure:"mail"`
+	Ring        RingConfig        `mapstructure:"ring"`
+	WebSocket   WebSocketConfig   `mapstructure:"websocket"`
+	Personality PersonalityConfig `mapstructure:"personality"`
+	Sentry      SentryConfig      `mapstructure:"sentry"`
 }
 
 type AppConfig struct {
@@ -147,6 +148,25 @@ type WebSocketConfig struct {
 	TLSSkipVerify bool   `mapstructure:"tlsSkipVerify"`
 }
 
+// PersonalityConfig configures the Persona gRPC endpoint used to summarize
+// ordinary mail for notifications. Summaries are opt-in per account and are
+// never requested for messages that carry a verification code or security
+// event, so the agent only ever sees messages our own rules found nothing in.
+type PersonalityConfig struct {
+	Target        string `mapstructure:"target"`
+	UseTLS        bool   `mapstructure:"useTLS"`
+	TLSSkipVerify bool   `mapstructure:"tlsSkipVerify"`
+	// Agent is the personality agent that writes the summaries.
+	Agent string `mapstructure:"agent"`
+	// Model optionally overrides the agent's default model.
+	Model string `mapstructure:"model"`
+	// TimeoutSeconds bounds one summary. Zero uses the client default.
+	TimeoutSeconds int `mapstructure:"timeoutSeconds"`
+	// DailyLimit caps summaries per account per UTC day. Zero disables
+	// summarization entirely, whatever an account asked for.
+	DailyLimit int `mapstructure:"dailyLimit"`
+}
+
 type SentryConfig struct {
 	DSN              string  `mapstructure:"dsn"`
 	TracesSampleRate float64 `mapstructure:"tracesSampleRate"`
@@ -204,6 +224,13 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("websocket.target", "")
 	v.SetDefault("websocket.useTLS", false)
 	v.SetDefault("websocket.tlsSkipVerify", false)
+	v.SetDefault("personality.target", "")
+	v.SetDefault("personality.useTLS", false)
+	v.SetDefault("personality.tlsSkipVerify", false)
+	v.SetDefault("personality.agent", "")
+	v.SetDefault("personality.model", "")
+	v.SetDefault("personality.timeoutSeconds", 20)
+	v.SetDefault("personality.dailyLimit", 20)
 	v.SetDefault("sentry.dsn", "")
 	v.SetDefault("sentry.tracesSampleRate", 0.01)
 	v.SetDefault("sentry.environment", "")

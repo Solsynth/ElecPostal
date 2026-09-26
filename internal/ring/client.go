@@ -13,7 +13,6 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"src.solsynth.dev/sosys/elecpostal/internal/localization"
-	"src.solsynth.dev/sosys/elecpostal/internal/logging"
 	"src.solsynth.dev/sosys/elecpostal/internal/mailintel"
 	gen "src.solsynth.dev/sosys/go/proto"
 )
@@ -23,29 +22,29 @@ import (
 // app id fall back to the Solian (Island) tenant.
 const AppID = "dev.solsynth.solarwatt"
 
-// LanguageResolver resolves the notification language of an account.
-type LanguageResolver interface {
-	Language(context.Context, string) (string, error)
-	Close() error
-}
-
 // EmailNotification is an incoming email as it reaches the notification layer.
+// The caller decides the content: Highlight and Summary are already resolved
+// against the recipient's preferences.
 type EmailNotification struct {
 	AccountID string
 	EmailID   string
-	Subject   string
-	FromName  string
-	Body      string
-	// ContentType distinguishes HTML bodies, which are reduced to text before
-	// the important part of the message is picked out.
-	ContentType string
+	// Language is the recipient's language tag; an empty value renders English.
+	Language string
+	// Subject is the fallback subtitle when nothing was extracted.
+	Subject  string
+	FromName string
+	// Highlight is the message's code, security event, or action request,
+	// empty when nothing stood out or the account disabled highlighting.
+	Highlight mailintel.Highlight
+	// Summary is a personality-service summary, used only when Highlight is
+	// empty.
+	Summary string
 }
 
 // Client sends account notifications through DyRingService.
 type Client struct {
-	conn     *grpc.ClientConn
-	client   gen.DyRingServiceClient
-	language LanguageResolver
+	conn   *grpc.ClientConn
+	client gen.DyRingServiceClient
 }
 
 func NewClient(target string, useTLS, tlsSkipVerify bool) (*Client, error) {
@@ -65,34 +64,37 @@ func NewClient(target string, useTLS, tlsSkipVerify bool) (*Client, error) {
 	return &Client{conn: conn, client: gen.NewDyRingServiceClient(conn)}, nil
 }
 
-// SetLanguageResolver enables per-recipient notification localization. Without
-// a resolver (or when a lookup fails) notifications are sent in English.
-func (c *Client) SetLanguageResolver(resolver LanguageResolver) { c.language = resolver }
-
 // SendEmailNotification pushes a localized incoming-mail notification to the
 // mailbox owner's SolWatt clients. The subtitle carries whatever the message
-// most wants from its recipient (verification code, security event, or action
-// request), falling back to the subject.
+// most wants from its recipient: an extracted highlight, a summary, or the
+// subject.
 func (c *Client) SendEmailNotification(ctx context.Context, notification EmailNotification) error {
-	language := c.resolveLanguage(ctx, notification.AccountID)
+	language := notification.Language
 	fromName := strings.TrimSpace(notification.FromName)
 	if fromName == "" {
 		fromName = localization.Localize(language, "newEmailUnknownSender", nil)
 	}
-	highlight := mailintel.Analyze(notification.Subject, notification.Body, notification.ContentType)
-	subtitle := highlight.Text
-	if subtitle == "" {
+	subtitle := notification.Highlight.Text
+	source := ""
+	switch {
+	case subtitle != "":
+	case notification.Summary != "":
+		subtitle, source = notification.Summary, "summary"
+	default:
 		subtitle = strings.TrimSpace(notification.Subject)
 		if subtitle == "" {
 			subtitle = localization.Localize(language, "newEmailNoSubject", nil)
 		}
 	}
 	meta := map[string]string{"email_id": notification.EmailID}
-	if highlight.Kind != mailintel.KindNone {
-		meta["kind"] = string(highlight.Kind)
+	if notification.Highlight.Kind != mailintel.KindNone {
+		meta["kind"] = string(notification.Highlight.Kind)
 	}
-	if highlight.Code != "" {
-		meta["code"] = highlight.Code
+	if notification.Highlight.Code != "" {
+		meta["code"] = notification.Highlight.Code
+	}
+	if source != "" {
+		meta["source"] = source
 	}
 	payload, err := json.Marshal(meta)
 	if err != nil {
@@ -103,7 +105,7 @@ func (c *Client) SendEmailNotification(ctx context.Context, notification EmailNo
 		UserId: notification.AccountID,
 		Notification: &gen.DyPushNotification{
 			Topic:    "email",
-			Title:    localization.Localize(language, titleKey(highlight.Kind), nil),
+			Title:    localization.Localize(language, titleKey(notification.Highlight.Kind), nil),
 			Subtitle: subtitle,
 			Body:     localization.Localize(language, "newEmailFromBody", map[string]string{"sender": fromName}),
 			Meta:     payload,
@@ -127,25 +129,4 @@ func titleKey(kind mailintel.Kind) string {
 	}
 }
 
-// resolveLanguage returns the account language, degrading to English when the
-// resolver is missing or the account lookup fails.
-func (c *Client) resolveLanguage(ctx context.Context, accountID string) string {
-	if c.language == nil {
-		return ""
-	}
-	language, err := c.language.Language(ctx, accountID)
-	if err != nil {
-		logging.Log.Warn().Err(err).Str("account_id", accountID).Msg("failed to resolve notification language")
-		return ""
-	}
-	return language
-}
-
-func (c *Client) Close() error {
-	if c.language != nil {
-		if err := c.language.Close(); err != nil {
-			return err
-		}
-	}
-	return c.conn.Close()
-}
+func (c *Client) Close() error { return c.conn.Close() }

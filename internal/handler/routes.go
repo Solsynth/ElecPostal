@@ -106,6 +106,43 @@ func RegisterRoutes(r *gin.RouterGroup, emailSvc *service.EmailService) {
 		workspaces.GET("/:id/send-usage", func(c *gin.Context) { getWorkspaceSendUsage(c, emailSvc) })
 		workspaces.GET("/:id/custom-domain-usage", func(c *gin.Context) { getWorkspaceCustomDomainUsage(c, emailSvc) })
 	}
+
+	settings := r.Group("/settings")
+	{
+		settings.GET("/notifications", func(c *gin.Context) { getNotificationSettings(c, emailSvc) })
+		settings.PATCH("/notifications", func(c *gin.Context) { updateNotificationSettings(c, emailSvc) })
+	}
+}
+
+func getNotificationSettings(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	settings, err := emailSvc.NotificationSettings(c.Request.Context(), uuid.MustParse(accountID))
+	if err != nil {
+		renderServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, settings)
+}
+
+func updateNotificationSettings(c *gin.Context, emailSvc *service.EmailService) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	var input service.UpdateNotificationSettingsInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	settings, err := emailSvc.UpdateNotificationSettings(c.Request.Context(), uuid.MustParse(accountID), input)
+	if err != nil {
+		renderServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, settings)
 }
 
 func listCustomDomains(c *gin.Context, emailSvc *service.EmailService) {

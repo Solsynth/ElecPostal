@@ -15,12 +15,14 @@ import (
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 
+	"src.solsynth.dev/sosys/elecpostal/internal/account"
 	"src.solsynth.dev/sosys/elecpostal/internal/database"
 	"src.solsynth.dev/sosys/elecpostal/internal/dmarc"
 	"src.solsynth.dev/sosys/elecpostal/internal/filesystem"
 	"src.solsynth.dev/sosys/elecpostal/internal/logging"
 	"src.solsynth.dev/sosys/elecpostal/internal/mailmime"
 	"src.solsynth.dev/sosys/elecpostal/internal/mailtext"
+	"src.solsynth.dev/sosys/elecpostal/internal/personality"
 	"src.solsynth.dev/sosys/elecpostal/internal/realtime"
 	"src.solsynth.dev/sosys/elecpostal/internal/relay"
 	"src.solsynth.dev/sosys/elecpostal/internal/ring"
@@ -257,6 +259,9 @@ type EmailService struct {
 	workspace         workspace.Provider
 	sharedQuotaClient gen.DyQuotaServiceClient
 	identities        relay.IdentityManager
+	language          account.Provider
+	summarizer        personality.Summarizer
+	summaryLimit      int
 	domain            string
 	inbound           string
 	dns               relay.DNSChecker
@@ -448,6 +453,16 @@ func (s *EmailService) Close() error {
 	}
 	if s.realtime != nil {
 		if err := s.realtime.Close(); err != nil {
+			return err
+		}
+	}
+	if s.language != nil {
+		if err := s.language.Close(); err != nil {
+			return err
+		}
+	}
+	if s.summarizer != nil {
+		if err := s.summarizer.Close(); err != nil {
 			return err
 		}
 	}
@@ -1978,14 +1993,7 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 		return nil, err
 	}
 	if s.notifier != nil && email.Folder == folderInbox {
-		if err := s.notifier.SendEmailNotification(ctx, ring.EmailNotification{
-			AccountID:   mailbox.AccountID.String(),
-			EmailID:     email.ID,
-			Subject:     email.Subject,
-			FromName:    email.FromName,
-			Body:        email.Body,
-			ContentType: email.ContentType,
-		}); err != nil {
+		if err := s.notifier.SendEmailNotification(ctx, s.buildEmailNotification(ctx, &email)); err != nil {
 			logging.Log.Warn().Err(err).Str("account_id", mailbox.AccountID.String()).Msg("failed to send incoming email notification")
 		}
 	}

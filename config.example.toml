@@ -129,6 +129,19 @@ target = ""
 useTLS = false
 tlsSkipVerify = false
 
+[personality]
+# Persona gRPC target used to summarize ordinary mail for notifications.
+# Summaries are opt-in per account (see PATCH /api/settings/notifications) and
+# are only requested for messages our own rules found no verification code,
+# security event, or action request in, so credentials never reach the agent.
+target = ""
+useTLS = false
+tlsSkipVerify = false
+agent = ""             # personality agent that writes the summaries, e.g. "michan"
+model = ""             # optional model override; empty uses the agent default
+timeoutSeconds = 20    # per-summary deadline; a slow agent is skipped
+dailyLimit = 20        # summaries per account per UTC day; 0 disables summaries
+
 [sentry]
 dsn = ""
 tracesSampleRate = 0.01

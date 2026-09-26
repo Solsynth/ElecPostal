@@ -344,6 +344,9 @@ List responses use `body` as a plain-text preview capped at 256 Unicode
 characters. HTML markup and embedded style/script content are omitted. The full
 message body remains available from `GET /api/emails/{email-id}`.
 
+Messages summarized for notifications also carry `summary`, the one-line
+personality-service summary. It is empty for every other message.
+
 
 For filter counts and navigation badges, use `GET /api/emails/stats` or
 `GET /api/mailboxes/{mailbox-id}/stats`. Both return a total, unread, starred,
@@ -585,6 +588,44 @@ action request (confirm, invoice past due, expiry) surfaces its own sentence
 instead of the subject. `meta.kind` carries `code`, `security`, or `action` for
 clients that want to style or route the push, and `meta` always carries
 `email_id`. Messages where nothing stands out keep the subject as the subtitle.
+
+When `personality.target` is configured and an account enables summaries, a
+message that carries no code, security event, or action request is summarized by
+the configured personality agent. The summary becomes both the notification
+subtitle (with `meta.source` set to `summary`) and the email's `summary` field.
+Summarization is skipped when the personality service is unavailable, when the
+agent answers with nothing usable, and once the account reaches
+`personality.dailyLimit` summaries for the current UTC day. Verification codes
+and security events are never sent to the agent, even when an account turns
+highlighting off.
+
+### Notification settings
+
+`GET /api/settings/notifications`
+
+```json
+{
+  "account_id": "01J...",
+  "highlight": true,
+  "summarize": false,
+  "created_at": "2026-09-26T05:00:00Z",
+  "updated_at": "2026-09-26T05:00:00Z"
+}
+```
+
+Preferences are stored per account, so every client of an account shares them.
+`highlight` defaults to `true` and switches code, security, and action
+extraction off; `summarize` defaults to `false` and opts into AI summaries.
+Accounts that never changed anything receive the defaults without a stored row.
+
+`PATCH /api/settings/notifications`
+
+```json
+{"summarize": true}
+```
+
+Both fields are optional and omitted fields keep their stored value. The
+response is the resulting settings object.
 
 ### Star and unstar
 
