@@ -65,6 +65,12 @@ type MessageSource struct {
 	Body        string
 	BodyType    string
 	Recipients  []Recipient
+	// MessageID is the outgoing message's own RFC 5322 Message-ID (without
+	// angle brackets); InReplyTo and References are the chain it answers. They
+	// are written as Message-ID/In-Reply-To/References headers when set.
+	MessageID   string
+	InReplyTo   string
+	References  string
 	Manifest    Manifest
 	Attachments map[string]Part
 	Source      AttachmentSource
@@ -162,6 +168,35 @@ func writeHeaders(source MessageSource, dst io.Writer) error {
 	}
 	if _, err := fmt.Fprintf(dst, "Subject: %s\r\nMIME-Version: 1.0\r\n", cleanHeader(source.Subject)); err != nil {
 		return err
+	}
+	// Message-ID and the reply chain let the recipient's client (and any reply
+	// it sends back) thread the message into the same conversation.
+	if mid := strings.TrimSpace(source.MessageID); mid != "" {
+		if _, err := fmt.Fprintf(dst, "Message-ID: <%s>\r\n", cleanHeader(mid)); err != nil {
+			return err
+		}
+	}
+	if inReplyTo := strings.TrimSpace(source.InReplyTo); inReplyTo != "" {
+		ids := make([]string, 0)
+		for _, id := range strings.Fields(inReplyTo) {
+			ids = append(ids, "<"+cleanHeader(id)+">")
+		}
+		if len(ids) > 0 {
+			if _, err := fmt.Fprintf(dst, "In-Reply-To: %s\r\n", strings.Join(ids, " ")); err != nil {
+				return err
+			}
+		}
+	}
+	if references := strings.TrimSpace(source.References); references != "" {
+		ids := make([]string, 0)
+		for _, id := range strings.Fields(references) {
+			ids = append(ids, "<"+cleanHeader(id)+">")
+		}
+		if len(ids) > 0 {
+			if _, err := fmt.Fprintf(dst, "References: %s\r\n", strings.Join(ids, " ")); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }

@@ -22,6 +22,12 @@ type Message struct {
 	Body          string
 	ContentType   string
 	ThreadID      string
+	// MessageID is the outgoing message's own RFC 5322 Message-ID (without
+	// angle brackets); InReplyTo and References carry the chain it answers so
+	// the recipient's client threads the reply the same way ElecPostal does.
+	MessageID     string
+	InReplyTo     string
+	References    string
 	AttachmentIDs []string
 	Attachments   []AttachmentMetadata
 }

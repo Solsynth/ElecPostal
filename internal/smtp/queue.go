@@ -23,6 +23,8 @@ import (
 type deliveryJob struct {
 	ID                   string                                   `json:"id"`
 	MessageID            string                                   `json:"message_id"`
+	InReplyTo            []string                                 `json:"in_reply_to,omitempty"`
+	References           []string                                 `json:"references,omitempty"`
 	FromAddress          string                                   `json:"from_address"`
 	FromName             string                                   `json:"from_name"`
 	Subject              string                                   `json:"subject"`
@@ -44,6 +46,7 @@ func newDeliveryJob(message parsedMessage, envelopeFrom string, recipients []rec
 		ID: uuid.NewString(), MessageID: message.id, FromAddress: message.fromAddress,
 		FromName: message.fromName, Subject: message.subject, Body: message.body,
 		ContentType: message.contentType, OmitContentType: message.omitContentType,
+		InReplyTo: message.inReplyTo, References: message.references,
 		To: message.to, Cc: message.cc,
 		Recipients: recipients, ReceivedAt: time.Now(), EnvelopeFrom: envelopeFrom,
 	}
@@ -103,6 +106,7 @@ func decodeLegacyDeliveryJob(data []byte) (deliveryJob, bool, error) {
 		}
 		job.FromAddress, job.FromName, job.Subject, job.Body, job.ContentType = parsed.FromAddress, parsed.FromName, parsed.Subject, parsed.Body, parsed.BodyType
 		job.OmitContentType = parsed.OmitContentType
+		job.InReplyTo, job.References = parsed.InReplyTo, parsed.References
 		job.To, job.Cc = nil, nil
 		for _, recipient := range parsed.To {
 			job.To = append(job.To, service.RecipientInput{Address: recipient.Address, Name: recipient.Name, Kind: recipient.Kind})
@@ -336,6 +340,7 @@ func deliverJob(ctx context.Context, backend Backend, job deliveryJob) error {
 			Cc: job.Cc, Attachments: transient, AttachmentReferences: references, SentAt: &job.ReceivedAt,
 			Authentication: job.Authentication, EnvelopeFrom: job.EnvelopeFrom,
 			DeliveredTo: deliveredTo, DmarcIntake: dmarcIntake,
+			InReplyTo: job.InReplyTo, References: job.References,
 		}); err != nil {
 			return err
 		}

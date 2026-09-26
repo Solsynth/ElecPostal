@@ -110,6 +110,12 @@ type Email struct {
 	// MessageID is the RFC 5322 Message-ID header value when present. It is the
 	// per-mailbox import dedupe key; NULL when the message had no Message-ID.
 	MessageID             *string        `gorm:"size:255" json:"message_id,omitempty"`
+	// InReplyTo and References are the RFC 5322 reply chain of the message
+	// (message-ids without angle brackets, space separated). They let the
+	// service chain replies into their conversation and re-emit the chain on
+	// outbound replies so the recipient's client threads them the same way.
+	InReplyTo             string         `gorm:"type:text" json:"in_reply_to,omitempty"`
+	References            string         `gorm:"type:text" json:"references,omitempty"`
 	IsRead                bool           `json:"is_read"`
 	IsStarred             bool           `json:"is_starred"`
 	IsDraft               bool           `gorm:"index:idx_emails_is_draft" json:"is_draft"`

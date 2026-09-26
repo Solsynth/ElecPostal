@@ -179,6 +179,31 @@ func formatMessage(message Message) []byte {
 	}
 	buffer.WriteString("\r\nSubject: ")
 	buffer.WriteString(message.Subject)
+	if mid := strings.TrimSpace(message.MessageID); mid != "" {
+		buffer.WriteString("\r\nMessage-ID: <")
+		buffer.WriteString(mid)
+		buffer.WriteString(">")
+	}
+	if inReplyTo := strings.TrimSpace(message.InReplyTo); inReplyTo != "" {
+		ids := make([]string, 0)
+		for _, id := range strings.Fields(inReplyTo) {
+			ids = append(ids, "<"+id+">")
+		}
+		if len(ids) > 0 {
+			buffer.WriteString("\r\nIn-Reply-To: ")
+			buffer.WriteString(strings.Join(ids, " "))
+		}
+	}
+	if references := strings.TrimSpace(message.References); references != "" {
+		ids := make([]string, 0)
+		for _, id := range strings.Fields(references) {
+			ids = append(ids, "<"+id+">")
+		}
+		if len(ids) > 0 {
+			buffer.WriteString("\r\nReferences: ")
+			buffer.WriteString(strings.Join(ids, " "))
+		}
+	}
 	contentType := message.ContentType
 	if contentType != "text/html" {
 		contentType = "text/plain"

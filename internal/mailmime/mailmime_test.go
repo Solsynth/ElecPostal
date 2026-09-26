@@ -178,3 +178,50 @@ func TestRenderPreservesAbsentContentType(t *testing.T) {
 		t.Fatalf("body = %q", body)
 	}
 }
+
+func TestRenderWritesThreadingHeaders(t *testing.T) {
+	source := MessageSource{
+		FromAddress: "sender@example.test", Subject: "Re: Plan", Body: "reply", BodyType: "text/plain",
+		Recipients: []Recipient{{Address: "recipient@example.test", Kind: "to"}},
+		MessageID:  "reply-1@example.test",
+		InReplyTo:  "root-1@example.test",
+		References: "root-1@example.test parent-1@example.test",
+	}
+	rendered, err := RenderBytes(context.Background(), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := mail.ReadMessage(bytes.NewReader(rendered))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := message.Header.Get("Message-ID"); got != "<reply-1@example.test>" {
+		t.Fatalf("Message-ID = %q, want <reply-1@example.test>", got)
+	}
+	if got := message.Header.Get("In-Reply-To"); got != "<root-1@example.test>" {
+		t.Fatalf("In-Reply-To = %q, want <root-1@example.test>", got)
+	}
+	if got := message.Header.Get("References"); got != "<root-1@example.test> <parent-1@example.test>" {
+		t.Fatalf("References = %q, want both ids bracketed", got)
+	}
+}
+
+func TestRenderOmitsThreadingHeadersWhenAbsent(t *testing.T) {
+	source := MessageSource{
+		FromAddress: "sender@example.test", Subject: "Fresh", Body: "body", BodyType: "text/plain",
+		Recipients: []Recipient{{Address: "recipient@example.test", Kind: "to"}},
+	}
+	rendered, err := RenderBytes(context.Background(), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := mail.ReadMessage(bytes.NewReader(rendered))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, header := range []string{"Message-ID", "In-Reply-To", "References"} {
+		if got := message.Header.Get(header); got != "" {
+			t.Fatalf("%s = %q, want omitted", header, got)
+		}
+	}
+}

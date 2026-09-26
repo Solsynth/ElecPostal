@@ -171,8 +171,10 @@ func TestImportEmailsPersistsInboxMembershipAndSource(t *testing.T) {
 	if email.Folder != "inbox" {
 		t.Fatalf("folder = %q, want inbox", email.Folder)
 	}
-	if email.MessageID == nil || *email.MessageID != "<abc@example.com>" {
-		t.Fatalf("message_id = %v, want <abc@example.com>", email.MessageID)
+	// message_ids are stored normalized (without angle brackets), matching what
+	// the client sends and what reply-chain lookups compare against.
+	if email.MessageID == nil || *email.MessageID != "abc@example.com" {
+		t.Fatalf("message_id = %v, want abc@example.com", email.MessageID)
 	}
 	if email.ContentType != "text/html" {
 		t.Fatalf("content_type = %q, want text/html", email.ContentType)

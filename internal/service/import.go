@@ -25,6 +25,12 @@ const maxImportEmails = 500
 type ImportEmailItem struct {
 	MailboxID     string           `json:"mailbox_id" binding:"required"`
 	MessageID     string           `json:"message_id,omitempty"`
+	// InReplyTo and References are the RFC 5322 reply chain of the message
+	// (message-ids without angle brackets). They let imports from a real
+	// mailbox chain replies to the conversations they answer instead of each
+	// landing as its own single-message thread.
+	InReplyTo     []string         `json:"in_reply_to,omitempty"`
+	References    []string         `json:"references,omitempty"`
 	FromAddress   string           `json:"from_address" binding:"required"`
 	FromName      string           `json:"from_name"`
 	Subject       string           `json:"subject"`
@@ -80,6 +86,13 @@ func (s *EmailService) ImportEmails(ctx context.Context, accountID uuid.UUID, in
 	result := ImportResult{}
 	seen := make(map[[2]string]struct{}, len(input.Emails))
 	workspaces := make(map[string]struct{})
+	// Message-ids imported earlier in this batch, by normalized id, so a child
+	// arriving before its parent in the same file still chains to it.
+	batchThreads := make(map[string]string, len(input.Emails))
+	// Message-ids referenced (In-Reply-To/References) by an earlier item but
+	// not yet seen as a message_id of their own. When the parent arrives later
+	// in the same batch it joins the thread its child already started.
+	referencedThreads := make(map[string]string, len(input.Emails))
 	for index, item := range input.Emails {
 		item.Subject = mailtext.ToValidUTF8(item.Subject)
 		item.Body = mailtext.ToValidUTF8(item.Body)
@@ -95,7 +108,9 @@ func (s *EmailService) ImportEmails(ctx context.Context, accountID uuid.UUID, in
 		}
 		var messageIDPtr *string
 		if mid := strings.TrimSpace(item.MessageID); mid != "" {
-			messageIDPtr = &mid
+			if normalized := normalizeMessageID(mid); normalized != "" {
+				messageIDPtr = &normalized
+			}
 		}
 
 		itemResult := ImportItemResult{Index: index, Status: "imported"}
@@ -143,7 +158,52 @@ func (s *EmailService) ImportEmails(ctx context.Context, accountID uuid.UUID, in
 			continue
 		}
 
-		threadID := database.NewID()
+		// Chain the imported message to the conversation its reply headers
+		// name: a parent already seen in this batch first, then any message the
+		// account already holds, so re-importing a real mailbox keeps its
+		// reply chains whole instead of one thread per message.
+		threadID := ""
+		candidates := make([]string, 0, len(item.InReplyTo)+len(item.References))
+		for _, id := range item.InReplyTo {
+			if normalized := normalizeMessageID(id); normalized != "" {
+				candidates = append(candidates, normalized)
+			}
+		}
+		for i := len(item.References) - 1; i >= 0; i-- {
+			if normalized := normalizeMessageID(item.References[i]); normalized != "" {
+				candidates = append(candidates, normalized)
+			}
+		}
+		for _, candidate := range candidates {
+			if thread, ok := batchThreads[candidate]; ok {
+				threadID = thread
+				break
+			}
+		}
+		if threadID == "" {
+			threadID, err = s.findThreadByMessageID(ctx, mailbox.AccountID, item.InReplyTo, item.References)
+			if err != nil {
+				recordFailure(err)
+				continue
+			}
+		}
+		if threadID == "" {
+			// The message itself was named by an earlier item's reply headers
+			// (its child arrived first); join the thread that child started.
+			if messageIDPtr != nil {
+				threadID = referencedThreads[normalizeMessageID(*messageIDPtr)]
+			}
+		}
+		if threadID == "" {
+			threadID = database.NewID()
+		}
+		for _, candidate := range candidates {
+			if _, known := batchThreads[candidate]; !known {
+				if _, pending := referencedThreads[candidate]; !pending {
+					referencedThreads[candidate] = threadID
+				}
+			}
+		}
 		email := database.Email{
 			AccountID:       mailbox.AccountID,
 			MailboxID:       mailbox.ID,
@@ -157,6 +217,9 @@ func (s *EmailService) ImportEmails(ctx context.Context, accountID uuid.UUID, in
 			Folder:          folderInbox,
 			ContentType:     normalizeContentType(item.ContentType),
 			OmitContentType: false,
+		}
+		if messageIDPtr != nil {
+			batchThreads[normalizeMessageID(*messageIDPtr)] = threadID
 		}
 		email.RawSizeBytes = incomingRawSize(email, ReceiveEmailInput{To: item.To, Cc: item.Cc})
 		if len(item.To) == 0 {

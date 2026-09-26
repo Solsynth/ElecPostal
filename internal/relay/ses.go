@@ -84,7 +84,36 @@ func sesMessage(message Message) *types.Message {
 	if message.ContentType == "text/html" {
 		body = &types.Body{Html: &types.Content{Data: aws.String(message.Body), Charset: aws.String("UTF-8")}}
 	}
-	return &types.Message{Subject: &types.Content{Data: aws.String(message.Subject), Charset: aws.String("UTF-8")}, Body: body}
+	msg := &types.Message{
+		Subject: &types.Content{Data: aws.String(message.Subject), Charset: aws.String("UTF-8")},
+		Body:    body,
+	}
+	var headers []types.MessageHeader
+	if mid := strings.TrimSpace(message.MessageID); mid != "" {
+		headers = append(headers, types.MessageHeader{Name: aws.String("Message-ID"), Value: aws.String("<" + mid + ">")})
+	}
+	if inReplyTo := strings.TrimSpace(message.InReplyTo); inReplyTo != "" {
+		ids := make([]string, 0)
+		for _, id := range strings.Fields(inReplyTo) {
+			ids = append(ids, "<"+id+">")
+		}
+		if len(ids) > 0 {
+			headers = append(headers, types.MessageHeader{Name: aws.String("In-Reply-To"), Value: aws.String(strings.Join(ids, " "))})
+		}
+	}
+	if references := strings.TrimSpace(message.References); references != "" {
+		ids := make([]string, 0)
+		for _, id := range strings.Fields(references) {
+			ids = append(ids, "<"+id+">")
+		}
+		if len(ids) > 0 {
+			headers = append(headers, types.MessageHeader{Name: aws.String("References"), Value: aws.String(strings.Join(ids, " "))})
+		}
+	}
+	if len(headers) > 0 {
+		msg.Headers = headers
+	}
+	return msg
 }
 
 func (a *SESAdapter) Close() error { return nil }

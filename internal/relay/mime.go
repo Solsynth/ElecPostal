@@ -67,6 +67,7 @@ func renderMessage(ctx context.Context, message Message, source AttachmentSource
 	return mailmime.RenderBytes(ctx, mailmime.MessageSource{
 		FromAddress: message.FromAddress, FromName: message.FromName, Subject: message.Subject,
 		Body: message.Body, BodyType: message.ContentType, Recipients: recipients,
+		MessageID: message.MessageID, InReplyTo: message.InReplyTo, References: message.References,
 		Manifest: manifest, Attachments: attachments, Source: relayAttachmentSource{source: source},
 	})
 }

@@ -259,6 +259,9 @@ func (ss *smtpSession) submit(message parsedMessage, raw []byte) error {
 	var external relay.Message
 	external.FromAddress, external.FromName = message.fromAddress, message.fromName
 	external.Subject, external.Body, external.ContentType = message.subject, message.body, message.contentType
+	external.MessageID = normalizeMessageID(message.id)
+	external.InReplyTo = strings.Join(message.inReplyTo, " ")
+	external.References = strings.Join(message.references, " ")
 	for _, r := range ss.recipients {
 		if r.MailboxID != "" {
 			local = append(local, r)
@@ -340,6 +343,12 @@ func classifyRecipient(address string, to, cc []service.RecipientInput) string {
 	return "bcc"
 }
 
+// normalizeMessageID strips the RFC 5322 angle brackets and surrounding
+// whitespace from a message-id, matching the form stored on email rows.
+func normalizeMessageID(value string) string {
+	return strings.TrimSpace(strings.Trim(value, "<>"))
+}
+
 func submissionError(err error) error {
 	switch {
 	case errors.Is(err, service.ErrOutboundRelayUnavailable):
@@ -388,6 +397,7 @@ func (l *singleConnListener) Addr() net.Addr { return l.addr }
 type parsedMessage struct {
 	id, fromAddress, fromName, subject, body, contentType string
 	omitContentType                                       bool
+	inReplyTo, references                                 []string
 	to, cc                                                []service.RecipientInput
 	attachments                                           []storedAttachment
 }
@@ -409,6 +419,7 @@ func parseMessage(raw []byte, envelopeFrom string, envelopeRecipients []recipien
 		id: parsed.ID, fromAddress: parsed.FromAddress, fromName: parsed.FromName,
 		subject: parsed.Subject, body: parsed.Body, contentType: parsed.BodyType,
 		omitContentType: parsed.OmitContentType,
+		inReplyTo:       parsed.InReplyTo, references: parsed.References,
 	}
 	if result.id == "" {
 		result.id = "<" + uuid.NewString() + "@elecpostal>"

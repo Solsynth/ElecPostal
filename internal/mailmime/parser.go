@@ -32,9 +32,15 @@ type ParsedMessage struct {
 	Body            string
 	BodyType        string
 	OmitContentType bool
-	To              []Recipient
-	Cc              []Recipient
-	Attachments     []IncomingAttachment
+	// InReplyTo and References carry the RFC 5322 reply chain: the Message-IDs
+	// a message answers (immediate parent) and the ancestors before it. Both
+	// are normalized without angle brackets, so they can be matched against
+	// stored message_ids as-is.
+	InReplyTo   []string
+	References  []string
+	To          []Recipient
+	Cc          []Recipient
+	Attachments []IncomingAttachment
 }
 
 func ParseMessage(raw []byte, envelopeFrom string, envelopeRecipients []Recipient) (ParsedMessage, error) {
@@ -46,6 +52,8 @@ func ParseMessage(raw []byte, envelopeFrom string, envelopeRecipients []Recipien
 		ID: strings.TrimSpace(message.Header.Get("Message-ID")), FromAddress: envelopeFrom,
 		BodyType: "text/plain", OmitContentType: strings.TrimSpace(message.Header.Get("Content-Type")) == "",
 	}
+	result.InReplyTo = splitMessageIDs(message.Header.Get("In-Reply-To"))
+	result.References = splitMessageIDs(message.Header.Get("References"))
 	if from, err := message.Header.AddressList("From"); err == nil && len(from) > 0 {
 		result.FromAddress = strings.ToLower(from[0].Address)
 		result.FromName = mailtext.DecodeHeader(from[0].Name)
@@ -79,6 +87,21 @@ func recipients(header mail.Header, key, kind string) []Recipient {
 		result = append(result, Recipient{Address: strings.ToLower(address.Address), Name: mailtext.DecodeHeader(address.Name), Kind: kind})
 	}
 	return result
+}
+
+// splitMessageIDs normalizes an RFC 5322 message-id header value
+// (In-Reply-To, References) into individual Message-IDs without angle
+// brackets, trimming any surrounding whitespace and continuation lines.
+func splitMessageIDs(value string) []string {
+	fields := strings.Fields(value)
+	ids := make([]string, 0, len(fields))
+	for _, field := range fields {
+		id := strings.Trim(field, "<> ")
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 func ParseEntity(header mail.Header, body io.Reader) (plain, html string, attachments []IncomingAttachment, err error) {

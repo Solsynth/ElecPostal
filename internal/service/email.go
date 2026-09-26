@@ -87,6 +87,7 @@ type SendEmailInput struct {
 	FromAliasID   string           `json:"from_alias_id,omitempty"`
 	ThreadID      string           `json:"thread_id,omitempty"`
 	ReplyToID     string           `json:"reply_to_id,omitempty"`
+	MessageID     string           `json:"message_id,omitempty"`
 	To            []RecipientInput `json:"to" binding:"required,min=1"`
 	Cc            []RecipientInput `json:"cc"`
 	Bcc           []RecipientInput `json:"bcc"`
@@ -116,6 +117,12 @@ type ReceiveEmailInput struct {
 	MailboxID            string
 	ThreadID             string
 	MessageID            string
+	// InReplyTo and References are the normalized RFC 5322 reply chain of the
+	// incoming message (message-ids without angle brackets). They let the
+	// service attach the message to the conversation it answers even when the
+	// sender's client did not carry ElecPostal's thread_id.
+	InReplyTo            []string
+	References           []string
 	FromAddress          string
 	FromName             string
 	Subject              string
@@ -1416,6 +1423,37 @@ func (s *EmailService) SendEmail(ctx context.Context, accountID uuid.UUID, input
 		return nil, err
 	}
 	input.ThreadID = threadID
+	// Build the reply chain the outgoing message carries so the recipient's
+	// client (and any reply that comes back) can thread it: In-Reply-To names
+	// the message being answered, References the ancestors before it.
+	inReplyTo, references := "", ""
+	if replyToID := strings.TrimSpace(input.ReplyToID); replyToID != "" {
+		var parent database.Email
+		if err := s.db.WithContext(ctx).Where("id = ? AND account_id = ?", replyToID, accountID).
+			First(&parent).Error; err == nil {
+			if parent.MessageID != nil && strings.TrimSpace(*parent.MessageID) != "" {
+				inReplyTo = *parent.MessageID
+				references = joinThreadIDs(append(
+					splitJoinedIDs(parent.References), *parent.MessageID,
+				))
+			}
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, err
+		}
+	}
+	// Give every outgoing message a Message-ID of its own (the client does not
+	// send one), so a reply that names it can chain back into the thread.
+	messageID := ""
+	if mid := strings.TrimSpace(input.MessageID); mid != "" {
+		messageID = normalizeMessageID(mid)
+	}
+	if messageID == "" && !input.IsDraft {
+		messageID = database.NewID() + "@elecpostal"
+	}
+	var messageIDPtr *string
+	if messageID != "" {
+		messageIDPtr = &messageID
+	}
 	mailboxLimit, err := s.workspaceMailboxLimit(ctx, mailbox.WorkspaceID)
 	if err != nil {
 		return nil, err
@@ -1455,6 +1493,9 @@ func (s *EmailService) SendEmail(ctx context.Context, accountID uuid.UUID, input
 		AccountID:      accountID,
 		MailboxID:      input.MailboxID,
 		ThreadID:       &threadID,
+		MessageID:      messageIDPtr,
+		InReplyTo:      inReplyTo,
+		References:     references,
 		Subject:        input.Subject,
 		Body:           input.Body,
 		FromAddress:    fromAddress,
@@ -1531,7 +1572,7 @@ func (s *EmailService) SendEmail(ctx context.Context, accountID uuid.UUID, input
 	if input.IsDraft || email.ScheduledAt != nil {
 		return &email, nil
 	}
-	message := outgoingRelayMessage(mailbox, fromAddress, input)
+	message := outgoingRelayMessage(mailbox, fromAddress, input, inReplyTo, references)
 	message.Attachments = relayAttachmentMetadata(attachmentReferences)
 	if err := s.deliverStoredEmail(ctx, &email, message); err != nil {
 		return nil, err
@@ -1685,7 +1726,7 @@ func (s *EmailService) recordDeliveryFailure(ctx context.Context, email *databas
 	return fmt.Errorf("deliver email: %s", message)
 }
 
-func outgoingRelayMessage(mailbox database.Mailbox, fromAddress string, input SendEmailInput) relay.Message {
+func outgoingRelayMessage(mailbox database.Mailbox, fromAddress string, input SendEmailInput, inReplyTo, references string) relay.Message {
 	message := relay.Message{
 		FromAddress:   fromAddress,
 		FromName:      mailbox.Name,
@@ -1693,6 +1734,9 @@ func outgoingRelayMessage(mailbox database.Mailbox, fromAddress string, input Se
 		Body:          input.Body,
 		ContentType:   normalizeContentType(input.ContentType),
 		ThreadID:      input.ThreadID,
+		MessageID:     normalizeMessageID(input.MessageID),
+		InReplyTo:     normalizeMessageID(inReplyTo),
+		References:    strings.Join(splitJoinedIDs(references), " "),
 		AttachmentIDs: input.AttachmentIDs,
 	}
 	for _, recipient := range input.To {
@@ -1715,6 +1759,85 @@ func relayAttachmentMetadata(references []AttachmentReference) []relay.Attachmen
 	return metadata
 }
 
+// normalizeMessageID strips the RFC 5322 angle brackets and surrounding
+// whitespace from a message-id so stored ids and reply-chain ids compare
+// equal regardless of whether a producer wrote them with or without brackets.
+func normalizeMessageID(value string) string {
+	return strings.TrimSpace(strings.Trim(value, "<>"))
+}
+
+// joinThreadIDs normalizes and dedupes a message-id list into the space
+// separated form stored on the email row (and re-emitted in outbound
+// References headers).
+func joinThreadIDs(ids []string) string {
+	seen := make(map[string]struct{}, len(ids))
+	joined := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if normalized := normalizeMessageID(id); normalized != "" {
+			if _, ok := seen[normalized]; ok {
+				continue
+			}
+			seen[normalized] = struct{}{}
+			joined = append(joined, normalized)
+		}
+	}
+	return strings.Join(joined, " ")
+}
+
+// splitJoinedIDs splits the stored space-separated message-id chain back into
+// individual ids (used to extend a parent's References with its own id).
+func splitJoinedIDs(joined string) []string {
+	return strings.Fields(joined)
+}
+
+// findThreadByMessageID returns the thread key an incoming message should join
+// given the message-ids it replies to (In-Reply-To first, then References,
+// most recent first). It returns the id of the found parent — either that
+// parent's existing thread, or (when the parent is its own thread root) the
+// parent's own id. The empty string means no parent is known.
+func (s *EmailService) findThreadByMessageID(
+	ctx context.Context,
+	accountID uuid.UUID,
+	inReplyTo, references []string,
+) (string, error) {
+	candidates := make([]string, 0, len(inReplyTo)+len(references))
+	for _, id := range inReplyTo {
+		if normalized := normalizeMessageID(id); normalized != "" {
+			candidates = append(candidates, normalized)
+		}
+	}
+	// References list ancestors oldest first; the nearest parent is last.
+	for i := len(references) - 1; i >= 0; i-- {
+		if normalized := normalizeMessageID(references[i]); normalized != "" {
+			candidates = append(candidates, normalized)
+		}
+	}
+	for _, candidate := range candidates {
+		var parent database.Email
+		err := s.db.WithContext(ctx).
+			Where("account_id = ? AND message_id = ?", accountID, candidate).
+			Order("created_at ASC").
+			First(&parent).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		if parent.ThreadID != nil && strings.TrimSpace(*parent.ThreadID) != "" {
+			return *parent.ThreadID, nil
+		}
+		// The parent is its own thread root; promote it so every later message
+		// of the chain (and GetThread) can find it under one id.
+		if err := s.db.WithContext(ctx).Model(&parent).
+			Update("thread_id", parent.ID).Error; err != nil {
+			return "", err
+		}
+		return parent.ID, nil
+	}
+	return "", nil
+}
+
 func relayMessageFromEmail(email database.Email) relay.Message {
 	message := relay.Message{
 		FromAddress: email.FromAddress,
@@ -1723,6 +1846,9 @@ func relayMessageFromEmail(email database.Email) relay.Message {
 		Body:        email.Body,
 		ContentType: email.ContentType,
 		ThreadID:    dereferenceString(email.ThreadID),
+		MessageID:   dereferenceString(email.MessageID),
+		InReplyTo:   normalizeMessageID(email.InReplyTo),
+		References:  strings.Join(splitJoinedIDs(email.References), " "),
 	}
 	for _, recipient := range email.Recipients {
 		switch recipient.Kind {
@@ -1787,6 +1913,8 @@ func (s *EmailService) DeliverLocal(ctx context.Context, message relay.Message, 
 			ContentType: message.ContentType, To: localRecipientInputs(message.To, "to"),
 			Cc: localRecipientInputs(message.Cc, "cc"), AttachmentReferences: attachmentReferences,
 			SentAt: &now, DeliveredTo: []string{recipient},
+			MessageID: message.MessageID, InReplyTo: splitJoinedIDs(message.InReplyTo),
+			References: splitJoinedIDs(message.References),
 		}); err != nil {
 			return err
 		}
@@ -1854,7 +1982,10 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 	input.EnvelopeFrom = mailtext.ToValidUTF8(input.EnvelopeFrom)
 	var messageID *string
 	if mid := strings.TrimSpace(input.MessageID); mid != "" {
-		messageID = &mid
+		normalized := normalizeMessageID(mid)
+		if normalized != "" {
+			messageID = &normalized
+		}
 	}
 	for i := range input.To {
 		input.To[i].Address = mailtext.ToValidUTF8(input.To[i].Address)
@@ -1920,6 +2051,8 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 		AccountID:       mailbox.AccountID,
 		MailboxID:       mailbox.ID,
 		MessageID:       messageID,
+		InReplyTo:       joinThreadIDs(input.InReplyTo),
+		References:      joinThreadIDs(input.References),
 		Subject:         input.Subject,
 		Body:            input.Body,
 		FromAddress:     input.FromAddress,
@@ -1932,6 +2065,16 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 		Authentication:  input.Authentication,
 	}
 	threadID := strings.TrimSpace(input.ThreadID)
+	if threadID == "" {
+		// No explicit thread: chain the message to the conversation its reply
+		// headers name, so a reply to a known message joins that conversation
+		// even though the sender never saw ElecPostal's thread id.
+		resolved, err := s.findThreadByMessageID(ctx, mailbox.AccountID, input.InReplyTo, input.References)
+		if err != nil {
+			return nil, err
+		}
+		threadID = resolved
+	}
 	if threadID == "" {
 		threadID = database.NewID()
 	}
