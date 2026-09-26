@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -151,20 +152,28 @@ func IsAccessRejection(err error) bool {
 }
 
 // buildPrompt asks for one notification-sized line and hands the agent the
-// message content it needs, bounded by promptRuneLimit.
+// message content it needs, bounded by promptRuneLimit. The instructions spend
+// most of their words on one failure mode: agents like to report what the email
+// is about ("这封邮件是关于…") instead of summarizing what it says.
 func buildPrompt(request SummaryRequest) string {
 	language := strings.TrimSpace(request.Language)
 	languageRule := "Write the summary in the same language as the email."
 	if language != "" {
 		languageRule = fmt.Sprintf("Write the summary in %s.", language)
 	}
+	example := summaryExamples["en"]
+	if strings.HasPrefix(strings.ToLower(language), "zh") {
+		example = summaryExamples["zh"]
+	}
 	var prompt strings.Builder
-	prompt.WriteString("Summarize this email for a phone notification.\n")
-	fmt.Fprintf(&prompt, "Reply with one plain-text line of at most %d characters: no greeting, no quotes, no markdown.\n", summaryRuneLimit)
+	fmt.Fprintf(&prompt, "Summarize what this email says, in one plain-text line of at most %d characters: no greeting, no quotes, no markdown, no label.\n", summaryRuneLimit)
+	prompt.WriteString("Summarize the content itself, never the message: do not start with wording like \"this email is about\", \"这封邮件是关于\", \"这是一封关于…的邮件\", and do not describe the email as a document.\n")
+	prompt.WriteString("State what the sender is telling or asking the reader, and what the reader has to do if the email asks for anything.\n")
+	prompt.WriteString("Write one complete sentence or clause: drop details instead of stopping halfway through a phrase.\n")
 	prompt.WriteString(languageRule)
-	prompt.WriteString("\nSay what the email is about, and what the reader has to do if it asks for anything.\n\n")
+	fmt.Fprintf(&prompt, "\n\nBad: %s\nGood: %s\n", example[0], example[1])
 	if fromName := strings.TrimSpace(request.FromName); fromName != "" {
-		fmt.Fprintf(&prompt, "From: %s\n", fromName)
+		fmt.Fprintf(&prompt, "\nFrom: %s\n", fromName)
 	}
 	if subject := strings.TrimSpace(request.Subject); subject != "" {
 		fmt.Fprintf(&prompt, "Subject: %s\n", subject)
@@ -174,8 +183,22 @@ func buildPrompt(request SummaryRequest) string {
 	return prompt.String()
 }
 
+// summaryExamples shows the agent the transformation we want, in the language
+// the summary must be written in: a bad and good answer to the same email.
+var summaryExamples = map[string][2]string{
+	"en": {
+		"This email is about your order and is a notification from our shop.",
+		"Order #A1842 shipped today and arrives on Thursday; nothing to do.",
+	},
+	"zh": {
+		"这封邮件是关于您的订单的，是一封来自商家的通知邮件。",
+		"订单 #A1842 今天已发货，预计周四送达，无需操作。",
+	},
+}
+
 // cleanSummary reduces an agent answer to one notification line: agents often
-// wrap a summary in quotes, markdown, or a "Summary:" label.
+// wrap a summary in quotes, markdown, or a "Summary:" label, and sometimes open
+// by describing the email instead of summarizing it.
 func cleanSummary(content string) string {
 	fields := strings.Fields(strings.TrimSpace(content))
 	if len(fields) == 0 {
@@ -188,7 +211,43 @@ func cleanSummary(content string) string {
 		summary = strings.TrimSpace(summary[at+size:])
 	}
 	summary = strings.Trim(summary, "\"'“”‘’`*")
-	return truncate(summary, summaryRuneLimit)
+	summary = stripSummaryPreamble(summary)
+	return truncateSummary(summary, summaryRuneLimit)
+}
+
+// summaryPreamble matches an opener that describes the email rather than its
+// content, such as "This email is about X" or "这封邮件是关于X的". The prompt
+// asks for a summary without one; this is the fallback for agents that add one
+// anyway.
+var summaryPreamble = regexp.MustCompile(`(?i)^(?:(?:this|the|an?)\s+(?:e-?mail|message|mail|letter|notification)\s+(?:is|was|seems)?\s*(?:about|regarding|concerning|announces?|announcing|informs?[^,，:：]*|says|describes|contains|covers|discusses|invites?|reminds?)\s*[:：,，]?\s*|(?:这|本|该|那)?\s*(?:封|条)?\s*(?:电子邮件|电邮|邮件内容|邮件|信件|消息|通知)\s*(?:是|为|讲的|说的|谈的|讲的是|说的是|谈的是|内容为|内容是|主要是|是有关|是关于)\s*(?:(?:一篇|一封|一个|一则|一条|一段)?(?:关于|有关)?|讲述|介绍|说明|宣布|通知|邀请)?\s*)`)
+
+// stripSummaryPreamble removes that opener, dropping the dangling 的 that
+// Chinese openers such as "这封邮件是关于…的" leave behind.
+func stripSummaryPreamble(summary string) string {
+	location := summaryPreamble.FindStringIndex(summary)
+	if location == nil || location[0] != 0 {
+		return summary
+	}
+	rest := strings.TrimSpace(summary[location[1]:])
+	if rest == "" {
+		// The agent answered with the opener alone: keep it rather than
+		// returning nothing.
+		return summary
+	}
+	if strings.HasPrefix(summary, "这") || strings.HasPrefix(summary, "本") || strings.HasPrefix(summary, "该") {
+		rest = strings.TrimSuffix(rest, "的")
+	}
+	return upperFirstRune(rest)
+}
+
+// upperFirstRune capitalizes a Latin opening letter left behind by a stripped
+// opener; other scripts are returned unchanged.
+func upperFirstRune(value string) string {
+	first, size := utf8.DecodeRuneInString(value)
+	if first < 'a' || first > 'z' {
+		return value
+	}
+	return string(first-'a'+'A') + value[size:]
 }
 
 // isSummaryLabel reports whether a prefix is a label such as "Summary" rather
@@ -200,6 +259,34 @@ func isSummaryLabel(prefix string) bool {
 	default:
 		return false
 	}
+}
+
+// truncateSummary bounds a summary to the notification budget, preferring to
+// end on a clause break so the reader is not handed half a phrase.
+func truncateSummary(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	if utf8.RuneCountInString(value) <= limit {
+		return value
+	}
+	runes := []rune(value)[:limit]
+	// Only a break near the budget is worth taking: an earlier one would drop
+	// too much of what the agent wrote.
+	if at := lastClauseBreak(runes); at > limit-limit/4 {
+		runes = runes[:at]
+	}
+	return strings.TrimRight(strings.TrimSpace(string(runes)), " ,，、;；:：.。!！?？") + "…"
+}
+
+// lastClauseBreak returns the offset just after the last sentence or clause
+// break in the runes.
+func lastClauseBreak(runes []rune) int {
+	for index := len(runes) - 1; index >= 0; index-- {
+		switch runes[index] {
+		case '.', '!', '?', ',', ';', ':', '。', '！', '？', '，', '、', '；', '：':
+			return index + 1
+		}
+	}
+	return 0
 }
 
 func truncate(value string, limit int) string {

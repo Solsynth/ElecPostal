@@ -98,8 +98,102 @@ func TestSummarizeSendsAgentContextAndBoundsInput(t *testing.T) {
 			t.Fatalf("prompt is missing %q:\n%s", want, prompt)
 		}
 	}
-	if runes := len([]rune(prompt)); runes > promptRuneLimit+512 {
-		t.Fatalf("prompt length = %d runes, want the body bounded by %d", runes, promptRuneLimit)
+	// The body is the only unbounded part of the prompt, so the prompt ends
+	// with it cut to promptRuneLimit.
+	if body := truncate(strings.Repeat("长", promptRuneLimit*2), promptRuneLimit); !strings.HasSuffix(prompt, body) {
+		t.Fatalf("prompt should end with the body bounded by %d runes", promptRuneLimit)
+	}
+}
+
+func TestBuildPromptAsksForTheContentNotTheEmail(t *testing.T) {
+	prompt := buildPrompt(SummaryRequest{Language: "zh-CN", Subject: "冰淇淋迷因"})
+	for _, want := range []string{
+		`do not start with wording like "this email is about", "这封邮件是关于"`,
+		"drop details instead of stopping halfway",
+		summaryExamples["zh"][0],
+		summaryExamples["zh"][1],
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt is missing %q:\n%s", want, prompt)
+		}
+	}
+	english := buildPrompt(SummaryRequest{Language: "en-US"})
+	if !strings.Contains(english, summaryExamples["en"][1]) || strings.Contains(english, summaryExamples["zh"][1]) {
+		t.Fatalf("english prompt should show the english example:\n%s", english)
+	}
+	// An unknown language cannot be matched, so the agent gets the English
+	// example and the same-language rule.
+	unknown := buildPrompt(SummaryRequest{})
+	if !strings.Contains(unknown, summaryExamples["en"][1]) || !strings.Contains(unknown, "same language as the email") {
+		t.Fatalf("unmatched language prompt = %q", unknown)
+	}
+}
+
+func TestCleanSummaryStripsEmailPreamble(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			name:    "chinese about-opener",
+			content: "这封邮件是关于约翰塞纳冰淇淋迷因与冰淇淋文化象征的",
+			want:    "约翰塞纳冰淇淋迷因与冰淇淋文化象征",
+		},
+		{
+			name:    "chinese opener with trailing clause",
+			content: "邮件是一篇关于约翰塞纳冰淇淋迷因的文章，讲了他如何成为文化符号",
+			want:    "约翰塞纳冰淇淋迷因的文章，讲了他如何成为文化符号",
+		},
+		{
+			name:    "chinese opener alone",
+			content: "这封邮件是关于",
+			want:    "这封邮件是关于",
+		},
+		{
+			name:    "english about-opener",
+			content: "This email is about your upcoming invoice.",
+			want:    "Your upcoming invoice.",
+		},
+		{
+			name:    "english opener with colon",
+			content: "The message is about: a 10% price increase.",
+			want:    "A 10% price increase.",
+		},
+		{
+			name:    "content that starts with a subject line",
+			content: "邮件已发送失败，请检查收件地址",
+			want:    "邮件已发送失败，请检查收件地址",
+		},
+		{
+			name:    "content that mentions the email later",
+			content: "Acme 的报价单将在周五到期，这封邮件里附了明细",
+			want:    "Acme 的报价单将在周五到期，这封邮件里附了明细",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := cleanSummary(test.content); got != test.want {
+				t.Fatalf("cleanSummary(%q) = %q, want %q", test.content, got, test.want)
+			}
+		})
+	}
+}
+
+func TestTruncateSummaryStopsAtAClauseBreak(t *testing.T) {
+	long := strings.Repeat("这一条消息说明了发货安排与配送进度,", 12) + "这一条消息说明了一切"
+	got := truncateSummary(long, summaryRuneLimit)
+	if !strings.HasSuffix(got, "…") {
+		t.Fatalf("truncateSummary() = %q, want an ellipsis", got)
+	}
+	if strings.HasSuffix(strings.TrimSuffix(got, "…"), ",") {
+		t.Fatalf("truncateSummary() = %q, want the clause break dropped", got)
+	}
+	if runes := len([]rune(got)); runes > summaryRuneLimit+1 {
+		t.Fatalf("truncateSummary() = %d runes, want at most %d", runes, summaryRuneLimit)
+	}
+	if body := strings.Repeat("字", summaryRuneLimit+10); truncateSummary(body, summaryRuneLimit) == body {
+		t.Fatal("truncateSummary() should bound a summary with no clause break")
 	}
 }
 
@@ -128,6 +222,22 @@ func TestSummarizeReportsFailures(t *testing.T) {
 			t.Fatal("Summarize() error = nil, want a timeout error")
 		}
 	})
+}
+
+func TestSummarizeReturnsTheContentWhenTheAgentDescribesTheEmail(t *testing.T) {
+	service := &fakePersonalityService{content: "这封邮件是关于约翰塞纳冰淇淋迷因与冰淇淋文化象征的"}
+	client := newTestClient(t, Config{Agent: "michan"}, service)
+
+	summary, err := client.Summarize(context.Background(), SummaryRequest{
+		AccountID: "account-1", Language: "zh-CN", Subject: "冰淇淋迷因",
+		Body: "本周约翰·塞纳的「冰淇淋」片段走红。",
+	})
+	if err != nil {
+		t.Fatalf("Summarize() error = %v", err)
+	}
+	if want := "约翰塞纳冰淇淋迷因与冰淇淋文化象征"; summary != want {
+		t.Fatalf("Summarize() = %q, want %q", summary, want)
+	}
 }
 
 func TestNewClientRequiresTargetAndAgent(t *testing.T) {
