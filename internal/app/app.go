@@ -129,6 +129,14 @@ func New(cfg *config.Config) (*App, error) {
 			return nil, err
 		}
 		emailSvc.SetRealtimePublisher(publisher)
+		logging.Log.Info().
+			Str("target", cfg.WebSocket.Target).
+			Msg("mail realtime publisher configured")
+	} else {
+		// Without a publisher every mail.changed publish is a silent no-op, so
+		// clients keep showing a list that never refreshes on new mail.
+		logging.Log.Warn().
+			Msg("mail realtime disabled: [websocket].target is empty, no mail.* packets will be pushed")
 	}
 	emailSvc.SetDomain(cfg.Mail.Domain)
 	emailSvc.SetInboundHost(cfg.Mail.Relay.InboundHost)
