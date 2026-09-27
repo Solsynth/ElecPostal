@@ -632,9 +632,12 @@ packets through the DysonNetwork WebSocket gateway under the
 When `ring.target` is configured, each new Inbox email also sends a standard
 account push notification with the email ID in its metadata. Spam messages do
 not trigger user notifications. The push targets the `dev.solsynth.solarwatt`
-Ring app, and its title and body are localized to the recipient's account
-language (resolved through `auth.target`), falling back to English. An empty
-subject renders as the localized "no subject" copy.
+Ring app, and its copy is localized to the recipient's account language
+(resolved through `auth.target`), falling back to English. The title labels the
+notification — `New Email`, `Verification Code`, `Security Alert`, or
+`Action Required` — followed by the message subject (` · ` as the separator),
+so the subject stays visible even when a highlight takes over the subtitle. A
+message without a subject renders the localized "no subject" copy in its place.
 
 The push is marked savable, so Ring keeps it in the account's notification
 history and replays it to a device that was offline when the message arrived.
@@ -646,9 +649,10 @@ rather than a leading excerpt. A verification code the message introduces
 (`123456`, `123 456`, `A1B2C3`, Chinese copy) becomes the subtitle and is
 mirrored in `meta.code`; a security event (password change, new sign-in) or an
 action request (confirm, invoice past due, expiry) surfaces its own sentence
-instead of the subject. `meta.kind` carries `code`, `security`, or `action` for
+as the subtitle. `meta.kind` carries `code`, `security`, or `action` for
 clients that want to style or route the push, and `meta` always carries
-`email_id`. Messages where nothing stands out keep the subject as the subtitle.
+`email_id`. Messages where nothing stands out carry no subtitle at all: the
+title already names the message.
 
 When `personality.target` is configured and an account enables summaries, every
 delivered Inbox message that carries no code, security event, or action request

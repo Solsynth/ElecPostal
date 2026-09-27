@@ -76,11 +76,11 @@ func TestSendEmailNotificationTargetsSolWattApp(t *testing.T) {
 	if AppID != "dev.solsynth.solarwatt" {
 		t.Fatalf("AppID = %q, want dev.solsynth.solarwatt", AppID)
 	}
-	if got := notification.GetTitle(); got != "New email" {
-		t.Fatalf("title = %q, want New email", got)
+	if got := notification.GetTitle(); got != "New Email · Lunch?" {
+		t.Fatalf("title = %q, want New Email · Lunch?", got)
 	}
-	if got := notification.GetSubtitle(); got != "Lunch?" {
-		t.Fatalf("subtitle = %q, want Lunch?", got)
+	if got := notification.GetSubtitle(); got != "" {
+		t.Fatalf("subtitle = %q, want no subtitle", got)
 	}
 	if got := notification.GetBody(); got != "From Ada Lovelace" {
 		t.Fatalf("body = %q, want From Ada Lovelace", got)
@@ -104,8 +104,8 @@ func TestSendEmailNotificationRendersHighlights(t *testing.T) {
 		Subject: "GitHub 登录验证", FromName: "GitHub",
 		Highlight: mailintel.Highlight{Kind: mailintel.KindCode, Text: "482913", Code: "482913"},
 	})
-	if got := notification.GetTitle(); got != "验证码" {
-		t.Fatalf("title = %q, want 验证码", got)
+	if got := notification.GetTitle(); got != "验证码 · GitHub 登录验证" {
+		t.Fatalf("title = %q, want the label and subject", got)
 	}
 	if got := notification.GetSubtitle(); got != "482913" {
 		t.Fatalf("subtitle = %q, want the extracted code", got)
@@ -125,8 +125,8 @@ func TestSendEmailNotificationRendersSummaries(t *testing.T) {
 		Subject: "This week at Acme", FromName: "Acme",
 		Summary: "Acme shipped three new features and a price change",
 	})
-	if got := notification.GetTitle(); got != "New email" {
-		t.Fatalf("title = %q, want New email", got)
+	if got := notification.GetTitle(); got != "New Email · This week at Acme" {
+		t.Fatalf("title = %q, want the label and subject", got)
 	}
 	if got := notification.GetSubtitle(); got != "Acme shipped three new features and a price change" {
 		t.Fatalf("subtitle = %q, want the summary", got)
@@ -157,11 +157,11 @@ func TestSendEmailNotificationPrefersHighlightOverSummary(t *testing.T) {
 
 func TestSendEmailNotificationFallsBackToEnglishPlaceholders(t *testing.T) {
 	notification := send(t, EmailNotification{AccountID: "account-1", EmailID: "email-1", Language: "fr-FR"})
-	if got := notification.GetTitle(); got != "New email" {
-		t.Fatalf("title = %q, want New email", got)
+	if got := notification.GetTitle(); got != "New Email · (No subject)" {
+		t.Fatalf("title = %q, want the label and the no-subject copy", got)
 	}
-	if got := notification.GetSubtitle(); got != "(No subject)" {
-		t.Fatalf("subtitle = %q, want (No subject)", got)
+	if got := notification.GetSubtitle(); got != "" {
+		t.Fatalf("subtitle = %q, want no subtitle", got)
 	}
 	if got := notification.GetBody(); got != "From New sender" {
 		t.Fatalf("body = %q, want From New sender", got)

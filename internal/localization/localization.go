@@ -7,13 +7,13 @@ import "strings"
 
 var messages = map[string]map[string]string{
 	"en": {
-		"newEmailTitle":         "New email",
+		"newEmailTitle":         "New Email",
 		"newEmailFromBody":      "From {sender}",
 		"newEmailNoSubject":     "(No subject)",
 		"newEmailUnknownSender": "New sender",
-		"verificationCodeTitle": "Verification code",
-		"securityAlertTitle":    "Security alert",
-		"actionRequiredTitle":   "Action required",
+		"verificationCodeTitle": "Verification Code",
+		"securityAlertTitle":    "Security Alert",
+		"actionRequiredTitle":   "Action Required",
 	},
 	"zh-hans": {
 		"newEmailTitle":         "新邮件",

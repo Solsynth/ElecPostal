@@ -12,7 +12,7 @@ func TestLocalizeUsesLocaleAndArguments(t *testing.T) {
 
 func TestLocalizeFallsBackToEnglish(t *testing.T) {
 	got := Localize("fr-FR", "newEmailTitle", nil)
-	want := "New email"
+	want := "New Email"
 	if got != want {
 		t.Fatalf("Localize() = %q, want %q", got, want)
 	}

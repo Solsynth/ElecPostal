@@ -30,7 +30,8 @@ type EmailNotification struct {
 	EmailID   string
 	// Language is the recipient's language tag; an empty value renders English.
 	Language string
-	// Subject is the fallback subtitle when nothing was extracted.
+	// Subject names the message in the notification title; an empty value
+	// renders the localized "no subject" copy.
 	Subject  string
 	FromName string
 	// Highlight is the message's code, security event, or action request,
@@ -64,27 +65,30 @@ func NewClient(target string, useTLS, tlsSkipVerify bool) (*Client, error) {
 	return &Client{conn: conn, client: gen.NewDyRingServiceClient(conn)}, nil
 }
 
+// titleSeparator joins the notification's label with the message subject.
+const titleSeparator = " · "
+
 // SendEmailNotification pushes a localized incoming-mail notification to the
-// mailbox owner's SolWatt clients. The subtitle carries whatever the message
-// most wants from its recipient: an extracted highlight, a summary, or the
-// subject.
+// mailbox owner's SolWatt clients. The title labels the notification and names
+// the message; the subtitle carries whatever the message most wants from its
+// recipient: an extracted highlight or a summary.
 func (c *Client) SendEmailNotification(ctx context.Context, notification EmailNotification) error {
 	language := notification.Language
 	fromName := strings.TrimSpace(notification.FromName)
 	if fromName == "" {
 		fromName = localization.Localize(language, "newEmailUnknownSender", nil)
 	}
+	subject := strings.TrimSpace(notification.Subject)
+	if subject == "" {
+		subject = localization.Localize(language, "newEmailNoSubject", nil)
+	}
+	// The subject belongs to the title alone: a subtitle repeating it would
+	// only echo what the reader already sees.
+	title := localization.Localize(language, titleKey(notification.Highlight.Kind), nil) + titleSeparator + subject
 	subtitle := notification.Highlight.Text
 	source := ""
-	switch {
-	case subtitle != "":
-	case notification.Summary != "":
+	if subtitle == "" && notification.Summary != "" {
 		subtitle, source = notification.Summary, "summary"
-	default:
-		subtitle = strings.TrimSpace(notification.Subject)
-		if subtitle == "" {
-			subtitle = localization.Localize(language, "newEmailNoSubject", nil)
-		}
 	}
 	meta := map[string]string{"email_id": notification.EmailID}
 	if notification.Highlight.Kind != mailintel.KindNone {
@@ -105,7 +109,7 @@ func (c *Client) SendEmailNotification(ctx context.Context, notification EmailNo
 		UserId: notification.AccountID,
 		Notification: &gen.DyPushNotification{
 			Topic:    "email",
-			Title:    localization.Localize(language, titleKey(notification.Highlight.Kind), nil),
+			Title:    title,
 			Subtitle: subtitle,
 			Body:     localization.Localize(language, "newEmailFromBody", map[string]string{"sender": fromName}),
 			Meta:     payload,
