@@ -232,11 +232,13 @@ func (ss *smtpSession) Rcpt(to string, _ *gosmtp.RcptOptions) error {
 	if !errors.Is(err, service.ErrNotFound) {
 		return &gosmtp.SMTPError{Code: 451, EnhancedCode: gosmtp.EnhancedCode{4, 3, 0}, Message: "Temporary recipient lookup failure"}
 	}
-	// Relay is restricted to authenticated submission sessions so the MX port
-	// never becomes an open relay for unauthenticated senders.
-	if ss.principal == nil || ss.principal.MailboxID == "" {
-		return &gosmtp.SMTPError{Code: 550, EnhancedCode: gosmtp.EnhancedCode{5, 1, 1}, Message: "User unknown"}
-	}
+	// The address is not a resolvable local mailbox. It is accepted for both
+	// authenticated submission (relayed when the message arrives) and
+	// unauthenticated MX intake, so the RCPT reply never reveals whether a
+	// local address exists. Unresolved recipients carry no mailbox id and are
+	// dropped during delivery: an unauthenticated MX session can therefore
+	// never relay, and a probe for a missing address is indistinguishable from
+	// one for an existing address.
 	ss.recipients = append(ss.recipients, recipient{Address: address, MailboxID: ""})
 	return nil
 }

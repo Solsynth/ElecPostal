@@ -63,6 +63,10 @@ type AuthConfig struct {
 	Target        string `mapstructure:"target"`
 	UseTLS        bool   `mapstructure:"useTLS"`
 	TLSSkipVerify bool   `mapstructure:"tlsSkipVerify"`
+	// AllowDevIDs trusts the client-supplied X-Account-Id header when no token
+	// authenticates the request. It exists only for local development and must
+	// stay false in any deployment that exposes the API.
+	AllowDevIDs bool `mapstructure:"allowDevIDs"`
 }
 
 // FileSystemConfig configures the FileSystem gRPC service used for email
@@ -212,6 +216,7 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("auth.target", "")
 	v.SetDefault("auth.useTLS", false)
 	v.SetDefault("auth.tlsSkipVerify", false)
+	v.SetDefault("auth.allowDevIDs", false)
 	v.SetDefault("filesystem.target", "")
 	v.SetDefault("filesystem.useTLS", false)
 	v.SetDefault("filesystem.tlsSkipVerify", false)
@@ -279,6 +284,7 @@ func Load(configPath string) (*Config, error) {
 func applyEnvOverrides(v *viper.Viper) {
 	setEnvIfPresent(v, "database.dsn", "DATABASE_DSN")
 	setEnvIfPresent(v, "auth.target", "AUTH_TARGET")
+	setEnvIfPresent(v, "auth.allowDevIDs", "AUTH_ALLOW_DEV_IDS")
 	setEnvIfPresent(v, "filesystem.target", "FILESYSTEM_TARGET")
 	setEnvIfPresent(v, "workspace.target", "WORKSPACE_TARGET")
 	setEnvIfPresent(v, "nats.target", "NATS_URL")

@@ -28,6 +28,7 @@ workers = 8
 target = "stargate:9090" # Stargate gRPC target (DyAuthService for request auth, DyAccountService for notification localization); leave empty to disable auth
 useTLS = true            # Stargate serves the fleet self-signed cert
 tlsSkipVerify = true
+allowDevIDs = false      # development only: trust the client-supplied X-Account-Id header when no token authenticates the request; never enable in production
 
 [filesystem]
 target = ""              # FileSystem gRPC target (host:port); leave empty to disable direct attachment uploads

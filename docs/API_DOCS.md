@@ -2,9 +2,11 @@
 
 Base path: `/api`
 
-All endpoints except `/health` and `/api/mail/host` require an authenticated account. Send a Solar
-access token using the normal `Authorization` header. For local development,
-when authentication is disabled, `X-Account-Id` may be used with an account UUID.
+All endpoints except `/health` require an authenticated account. Send a Solar
+access token using the normal `Authorization` header. For local development
+only, setting `auth.allowDevIDs = true` lets `X-Account-Id` (an account UUID)
+stand in for a token when no token authenticates the request; each such request
+is logged with a warning and the flag must stay disabled in production.
 
 Errors have this shape:
 
@@ -18,8 +20,9 @@ Errors have this shape:
 
 `GET /api/mail/host`
 
-Returns the configured canonical mail domain. Clients can use it to render
-local-only mailbox addresses as full email addresses.
+Requires an authenticated account. Returns the configured canonical mail
+domain. Clients can use it to render local-only mailbox addresses as full
+email addresses.
 
 ```json
 {"host":"example.com"}

@@ -197,16 +197,40 @@ func TestSMTPAcceptsESMTPEnvelopeParameters(t *testing.T) {
 	}
 }
 
-func TestSMTPUnknownAndExternalRecipientsRejected(t *testing.T) {
-	backend := &fakeBackend{mailboxes: map[string]*database.Mailbox{}}
+// Mailbox existence must not be observable to an unauthenticated MX client:
+// existing, missing, and external recipients all get an identical RCPT reply,
+// and the message is still delivered only to the mailbox that actually exists.
+// This replaces an earlier test that pinned the 550 user-unknown probe reply.
+func TestSMTPRecipientResponsesDoNotRevealMailboxExistence(t *testing.T) {
+	box := &database.Mailbox{ID: "alice"}
+	backend := &fakeBackend{mailboxes: map[string]*database.Mailbox{"alice@example.test": box}}
 	r, w, conn := newSession(t, backend, "25")
 	defer conn.Close()
 	_ = command(t, r, w, "EHLO test")
 	_ = command(t, r, w, "MAIL FROM:<sender@remote.test>")
-	for _, address := range []string{"missing@example.test", "person@external.test"} {
-		if got := command(t, r, w, "RCPT TO:<"+address+">"); got != "550 5.1.1 User unknown" {
-			t.Fatalf("%s: %q", address, got)
+	existing := command(t, r, w, "RCPT TO:<alice@example.test>")
+	missing := command(t, r, w, "RCPT TO:<missing@example.test>")
+	external := command(t, r, w, "RCPT TO:<person@external.test>")
+	// The reply text echoes the address, so compare the status code and
+	// enhanced code only: those are what a prober can read back.
+	statusOf := func(reply string) string {
+		fields := strings.Fields(reply)
+		if len(fields) < 2 {
+			return reply
 		}
+		return fields[0] + " " + fields[1]
+	}
+	if !strings.HasPrefix(existing, "250") {
+		t.Fatalf("existing recipient rejected: %q", existing)
+	}
+	if statusOf(missing) != statusOf(existing) || statusOf(external) != statusOf(existing) {
+		t.Fatalf("recipient replies leak mailbox existence: existing=%q missing=%q external=%q", existing, missing, external)
+	}
+	if got := data(t, r, w, "From: Sender <sender@remote.test>\r\nTo: alice@example.test\r\nSubject: probe\r\n\r\nplain body"); !strings.HasPrefix(got, "250") {
+		t.Fatalf("DATA reply = %q, want 250", got)
+	}
+	if len(backend.inputs) != 1 || backend.inputs[0].MailboxID != "alice" {
+		t.Fatalf("delivery = %#v, want exactly the existing mailbox", backend.inputs)
 	}
 }
 

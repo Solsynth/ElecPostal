@@ -28,6 +28,7 @@ Key settings:
 - `grpc.useTLS`
 - `auth.target`
 - `auth.useTLS`
+- `auth.allowDevIDs` (development only, default `false`: when true, a request without a valid token may set identity with the `X-Account-Id` header. Every use is logged with a warning; never enable it in a deployment that exposes the API)
 - `filesystem.target` (optional FileSystem gRPC endpoint for inbound email attachments)
 - `workspace.target` (Workspace gRPC endpoint required for workspace mailbox authorization and plan-based mail quotas)
 - `ring.target` (optional Ring gRPC endpoint for account notifications; pushes target the `dev.solsynth.solarwatt` app, are localized to the recipient's account language via `auth.target`, and surface the extracted verification code or key sentence instead of a leading excerpt)
@@ -109,7 +110,9 @@ permission. AWS credentials are never sent by clients or stored in ElecPostal.
 For either adapter, set `mail.relay.inboundHost` to this service's public MX
 hostname. If DNS resolves a recipient domain to that host, ElecPostal stores
 the message directly in its local mailbox rather than handing it to the
-external delivery path.
+external delivery path. An unauthenticated MX session always accepts a
+recipient at `RCPT TO` and drops unresolvable addresses at delivery, so the
+reply never reveals whether a local mailbox exists.
 
 Other delivery providers, including SES, are implemented as adapters behind the
 same outbound-delivery contract. Attachment IDs require a DysonFS byte source;

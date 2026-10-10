@@ -37,6 +37,9 @@ func NewRouter(cfg *config.Config, emailSvc *service.EmailService) *gin.Engine {
 	handler.RegisterRoutes(api, emailSvc)
 
 	api.GET("/mail/host", func(c *gin.Context) {
+		if _, ok := identity.RequireAccountID(c); !ok {
+			return
+		}
 		c.JSON(http.StatusOK, gin.H{"host": emailSvc.MailHost()})
 	})
 
@@ -74,9 +77,13 @@ func authMiddleware(cfg *config.Config) gin.HandlerFunc {
 			}
 		}
 
-		if _, exists := c.Get("account_id"); !exists {
-			accountID := strings.TrimSpace(c.GetHeader("X-Account-Id"))
-			if accountID != "" {
+		// Client-supplied identity headers are never trusted. The only escape
+		// hatch is an explicit development flag, which logs every use.
+		if _, exists := c.Get("account_id"); !exists && cfg.Auth.AllowDevIDs {
+			if accountID := strings.TrimSpace(c.GetHeader("X-Account-Id")); accountID != "" {
+				logging.Log.Warn().
+					Str("account_id", accountID).
+					Msg("trusting client-supplied X-Account-Id header because auth.allowDevIDs is enabled; disable it outside local development")
 				identity.SetAccountID(c, accountID)
 			}
 		}
