@@ -19,7 +19,8 @@ import (
 func NewRouter(cfg *config.Config, emailSvc *service.EmailService) *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Recovery())
-	r.Use(authMiddleware(cfg))
+	authenticator, sudoValidator := buildAuthClient(cfg)
+	r.Use(authMiddleware(authenticator, cfg))
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"ok": true, "service": "elecpostal"})
@@ -34,7 +35,7 @@ func NewRouter(cfg *config.Config, emailSvc *service.EmailService) *gin.Engine {
 	r.GET("/jmap/download/:accountId/:blobId/:name", jmapHandler.Download)
 
 	api := r.Group("/api")
-	handler.RegisterRoutes(api, emailSvc)
+	handler.RegisterRoutes(api, emailSvc, sudoValidator)
 
 	api.GET("/mail/host", func(c *gin.Context) {
 		if _, ok := identity.RequireAccountID(c); !ok {
@@ -50,20 +51,25 @@ func NewRouter(cfg *config.Config, emailSvc *service.EmailService) *gin.Engine {
 	return r
 }
 
-func authMiddleware(cfg *config.Config) gin.HandlerFunc {
-	var authenticator sharedauth.TokenAuthenticator
-	if cfg.Auth.Target != "" {
-		client, err := sharedauth.NewGrpcTokenAuthenticator(sharedauth.GrpcAuthDialConfig{
-			Target:        cfg.Auth.Target,
-			UseTLS:        cfg.Auth.UseTLS,
-			TLSSkipVerify: cfg.Auth.TLSSkipVerify,
-		})
-		if err != nil {
-			logging.Log.Fatal().Err(err).Msg("failed to initialize auth client")
-		}
-		authenticator = client
+// buildAuthClient constructs the shared gRPC authenticator once so the same
+// connection backs both request authentication and the elevation check
+// (GrpcTokenAuthenticator implements TokenAuthenticator and SudoValidator).
+func buildAuthClient(cfg *config.Config) (sharedauth.TokenAuthenticator, sharedauth.SudoValidator) {
+	if cfg.Auth.Target == "" {
+		return nil, nil
 	}
+	client, err := sharedauth.NewGrpcTokenAuthenticator(sharedauth.GrpcAuthDialConfig{
+		Target:        cfg.Auth.Target,
+		UseTLS:        cfg.Auth.UseTLS,
+		TLSSkipVerify: cfg.Auth.TLSSkipVerify,
+	})
+	if err != nil {
+		logging.Log.Fatal().Err(err).Msg("failed to initialize auth client")
+	}
+	return client, client
+}
 
+func authMiddleware(authenticator sharedauth.TokenAuthenticator, cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if authenticator != nil {
 			result, err := sharedauth.AuthenticateRequest(c.Request.Context(), authenticator, c.Request)

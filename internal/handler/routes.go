@@ -12,10 +12,14 @@ import (
 
 	"src.solsynth.dev/sosys/elecpostal/internal/identity"
 	"src.solsynth.dev/sosys/elecpostal/internal/service"
+
+	sharedauth "src.solsynth.dev/sosys/go/pkg/auth"
 )
 
-// RegisterRoutes registers HTTP handlers.
-func RegisterRoutes(r *gin.RouterGroup, emailSvc *service.EmailService) {
+// RegisterRoutes registers HTTP handlers. sudoValidator gates the
+// mail-credential mutations on a live elevation grant; a nil validator fails
+// those routes closed with 503.
+func RegisterRoutes(r *gin.RouterGroup, emailSvc *service.EmailService, sudoValidator sharedauth.SudoValidator) {
 	mailboxes := r.Group("/mailboxes")
 	{
 		mailboxes.GET("", func(c *gin.Context) { listMailboxes(c, emailSvc) })
@@ -83,8 +87,8 @@ func RegisterRoutes(r *gin.RouterGroup, emailSvc *service.EmailService) {
 	credentials := r.Group("/credentials")
 	{
 		credentials.GET("", func(c *gin.Context) { listMailCredentials(c, emailSvc) })
-		credentials.POST("", func(c *gin.Context) { createMailCredential(c, emailSvc) })
-		credentials.DELETE("/:id", func(c *gin.Context) { deleteMailCredential(c, emailSvc) })
+		credentials.POST("", sharedauth.RequireSudo(sudoValidator), func(c *gin.Context) { createMailCredential(c, emailSvc) })
+		credentials.DELETE("/:id", sharedauth.RequireSudo(sudoValidator), func(c *gin.Context) { deleteMailCredential(c, emailSvc) })
 	}
 	r.POST("/import", func(c *gin.Context) { importEmails(c, emailSvc) })
 	admin := r.Group("/admin")

@@ -34,7 +34,7 @@ func newSettingsTestRouter(t *testing.T) (*gin.Engine, uuid.UUID) {
 		identity.SetAccountID(c, accountID.String())
 		c.Next()
 	})
-	RegisterRoutes(group, service.NewEmailService(&database.DB{DB: db}, nil))
+	RegisterRoutes(group, service.NewEmailService(&database.DB{DB: db}, nil), nil)
 	return router, accountID
 }
 

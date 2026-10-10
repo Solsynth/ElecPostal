@@ -50,7 +50,7 @@ func TestEmailRoutesListPreviewAndDownloadSerializedEML(t *testing.T) {
 		identity.SetAccountID(c, accountID.String())
 		c.Next()
 	})
-	RegisterRoutes(group, svc)
+	RegisterRoutes(group, svc, nil)
 	senderRequest := httptest.NewRequest(http.MethodGet, "/api/addresses/senders?q=sender", nil)
 	senderResponse := httptest.NewRecorder()
 	router.ServeHTTP(senderResponse, senderRequest)
@@ -139,7 +139,7 @@ func TestEmailRoutesPermanentlyDeleteAndEmptyTrash(t *testing.T) {
 		identity.SetAccountID(c, accountID.String())
 		c.Next()
 	})
-	RegisterRoutes(group, svc)
+	RegisterRoutes(group, svc, nil)
 
 	// A single message leaves Trash for good.
 	permanentRequest := httptest.NewRequest(http.MethodDelete, "/api/emails/"+trashed.ID+"/permanent", nil)
