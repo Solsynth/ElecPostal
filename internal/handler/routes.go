@@ -24,6 +24,7 @@ func RegisterRoutes(r *gin.RouterGroup, emailSvc *service.EmailService, sudoVali
 	{
 		mailboxes.GET("", func(c *gin.Context) { listMailboxes(c, emailSvc) })
 		mailboxes.POST("", func(c *gin.Context) { createMailbox(c, emailSvc) })
+		mailboxes.POST("/:id/read-all", func(c *gin.Context) { markAllRead(c, emailSvc, c.Param("id")) })
 		mailboxes.GET("/:id/emails", func(c *gin.Context) { listMailboxEmails(c, emailSvc) })
 		mailboxes.GET("/:id/threads", func(c *gin.Context) { listThreads(c, emailSvc, c.Param("id")) })
 		mailboxes.DELETE("/:id/trash", func(c *gin.Context) { emptyMailboxTrash(c, emailSvc) })
@@ -47,6 +48,7 @@ func RegisterRoutes(r *gin.RouterGroup, emailSvc *service.EmailService, sudoVali
 	{
 		emails.GET("", func(c *gin.Context) { listEmails(c, emailSvc) })
 		emails.GET("/stats", func(c *gin.Context) { getMailboxStats(c, emailSvc) })
+		emails.POST("/read-all", func(c *gin.Context) { markAllRead(c, emailSvc, "") })
 		emails.GET("/:id", func(c *gin.Context) { getEmail(c, emailSvc) })
 		emails.POST("", func(c *gin.Context) { sendEmail(c, emailSvc) })
 		emails.GET("/:id/eml", func(c *gin.Context) { downloadEmailEML(c, emailSvc) })
@@ -607,6 +609,25 @@ func markStarred(c *gin.Context, emailSvc *service.EmailService, isStarred bool)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// markAllRead marks every unread message in scope read and reports the count.
+// mailboxID comes from the path of the mailbox-scoped route; the folder query
+// filter narrows the sweep further. With neither, the whole account is swept.
+func markAllRead(c *gin.Context, emailSvc *service.EmailService, mailboxID string) {
+	accountID, ok := identity.RequireAccountID(c)
+	if !ok {
+		return
+	}
+	updated, err := emailSvc.MarkAllRead(c.Request.Context(), uuid.MustParse(accountID), service.MarkAllReadInput{
+		MailboxID: mailboxID,
+		Folder:    strings.TrimSpace(c.Query("folder")),
+	})
+	if err != nil {
+		renderServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"updated": updated})
 }
 
 func listLabels(c *gin.Context, emailSvc *service.EmailService) {

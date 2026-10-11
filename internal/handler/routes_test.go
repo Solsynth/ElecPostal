@@ -194,6 +194,82 @@ func TestEmailRoutesPermanentlyDeleteAndEmptyTrash(t *testing.T) {
 	}
 }
 
+func TestEmailRoutesMarkAllRead(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, err := gorm.Open(sqlite.Open("file:"+database.NewID()+"?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&database.Email{}, &database.Mailbox{}); err != nil {
+		t.Fatal(err)
+	}
+	accountID := uuid.New()
+	mailbox := database.Mailbox{ID: database.NewID(), AccountID: accountID, WorkspaceID: "workspace-test", Address: "owner@example.test"}
+	if err := db.Create(&mailbox).Error; err != nil {
+		t.Fatal(err)
+	}
+	message := func(folder string, isRead bool) database.Email {
+		email := database.Email{ID: database.NewID(), AccountID: accountID, MailboxID: mailbox.ID, Subject: "Subject " + folder, Body: "body", Folder: folder, FromAddress: "sender@example.test", IsRead: isRead}
+		if err := db.Create(&email).Error; err != nil {
+			t.Fatal(err)
+		}
+		return email
+	}
+	inboxOne := message("inbox", false)
+	inboxTwo := message("inbox", false)
+	sent := message("sent", false)
+	message("sent", true)
+	svc := service.NewEmailService(&database.DB{DB: db}, nil)
+	svc.SetWorkspaceProvider(routeWorkspaceProvider{})
+	router := gin.New()
+	group := router.Group("/api")
+	group.Use(func(c *gin.Context) {
+		identity.SetAccountID(c, accountID.String())
+		c.Next()
+	})
+	RegisterRoutes(group, svc, nil)
+
+	// The folder filter sweeps only that folder account-wide.
+	folderRequest := httptest.NewRequest(http.MethodPost, "/api/emails/read-all?folder=inbox", nil)
+	folderResponse := httptest.NewRecorder()
+	router.ServeHTTP(folderResponse, folderRequest)
+	if folderResponse.Code != http.StatusOK || !strings.Contains(folderResponse.Body.String(), `"updated":2`) {
+		t.Fatalf("folder read-all = status %d, body %s", folderResponse.Code, folderResponse.Body.String())
+	}
+	for _, id := range []string{inboxOne.ID, inboxTwo.ID} {
+		var row database.Email
+		if err := db.First(&row, "id = ?", id).Error; err != nil {
+			t.Fatal(err)
+		}
+		if !row.IsRead {
+			t.Fatalf("inbox message %s left unread", id)
+		}
+	}
+
+	// The mailbox route sweeps the remaining folders of one hosted address.
+	mailboxRequest := httptest.NewRequest(http.MethodPost, "/api/mailboxes/"+mailbox.ID+"/read-all", nil)
+	mailboxResponse := httptest.NewRecorder()
+	router.ServeHTTP(mailboxResponse, mailboxRequest)
+	if mailboxResponse.Code != http.StatusOK || !strings.Contains(mailboxResponse.Body.String(), `"updated":1`) {
+		t.Fatalf("mailbox read-all = status %d, body %s", mailboxResponse.Code, mailboxResponse.Body.String())
+	}
+	var row database.Email
+	if err := db.First(&row, "id = ?", sent.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !row.IsRead {
+		t.Fatalf("sent message left unread after mailbox sweep")
+	}
+
+	// An unknown folder is a client error, not a silent no-op.
+	badRequest := httptest.NewRequest(http.MethodPost, "/api/emails/read-all?folder=junk", nil)
+	badResponse := httptest.NewRecorder()
+	router.ServeHTTP(badResponse, badRequest)
+	if badResponse.Code != http.StatusBadRequest {
+		t.Fatalf("read-all with an unknown folder = %d, want 400", badResponse.Code)
+	}
+}
+
 // routeWorkspaceProvider stands in for Valve: every account is a member and no
 // plan limit is reached.
 type routeWorkspaceProvider struct{}

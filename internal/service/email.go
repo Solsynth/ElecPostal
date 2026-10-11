@@ -3036,6 +3036,36 @@ func (s *EmailService) MarkStarred(ctx context.Context, accountID uuid.UUID, id 
 	return nil
 }
 
+// MarkAllReadInput scopes a bulk read-flag sweep. Empty fields widen it: no
+// mailbox or folder filter means every unread message in the account.
+type MarkAllReadInput struct {
+	MailboxID string
+	Folder    string
+}
+
+// MarkAllRead marks every unread message in scope read and reports how many
+// rows changed. Archived messages and DMARC intake reports are skipped, so the
+// sweep matches the list, stats, and unread badge counts.
+func (s *EmailService) MarkAllRead(ctx context.Context, accountID uuid.UUID, input MarkAllReadInput) (int64, error) {
+	folder := strings.TrimSpace(strings.ToLower(input.Folder))
+	if folder != "" && !validFolder(folder) {
+		return 0, fmt.Errorf("invalid folder")
+	}
+	query := s.db.WithContext(ctx).Model(&database.Email{}).
+		Where("account_id = ? AND is_read = ? AND archived_at IS NULL AND is_dmarc_intake = ?", accountID, false, false)
+	if mailboxID := strings.TrimSpace(input.MailboxID); mailboxID != "" {
+		query = query.Where("mailbox_id = ?", mailboxID)
+	}
+	if folder != "" {
+		query = query.Where("folder = ?", folder)
+	}
+	result := query.Update("is_read", true)
+	if result.Error != nil {
+		return 0, result.Error
+	}
+	return result.RowsAffected, nil
+}
+
 func normalizeKind(kind, fallback string) string {
 	switch strings.ToLower(strings.TrimSpace(kind)) {
 	case "to", "cc", "bcc":

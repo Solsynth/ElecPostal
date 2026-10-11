@@ -606,6 +606,22 @@ silently omitted.
 
 Both return `{"ok":true}`.
 
+### Mark everything read
+
+`POST /api/emails/read-all`
+
+`POST /api/mailboxes/{mailbox-id}/read-all`
+
+Sweep every unread message in scope to read. The account-wide route covers all
+of the caller's mailboxes; the mailbox-scoped route covers one hosted address.
+Add `?folder=inbox` (any of `inbox`, `sent`, `drafts`, `spam`, `trash`,
+`archive`) to limit the sweep to a single folder. Archived messages and DMARC
+intake reports are never touched. Both return the number of messages changed:
+
+```json
+{"updated":42}
+```
+
 ### Folders and spam
 
 New inbound mail arrives in `inbox`; sent messages and drafts are stored in
