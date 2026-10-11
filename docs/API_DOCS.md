@@ -640,6 +640,12 @@ without SPF or DKIM alignment, or reaches the spam threshold is retained in Spam
 for review. Authentication warnings, including the phishing verdict, remain
 attached to the message after it is restored to Inbox.
 
+The folder is one shared state, not a per-surface label: a move made here is what
+the address's IMAP and JMAP clients see, and anything a protocol client moves
+between folders changes the `folder` this API reports. The six folders are the
+whole namespace (`INBOX`, `Sent`, `Drafts`, `Spam`, `Trash`, `Archive`); IMAP
+LIST advertises the RFC 6154 special-use attribute of each one that has a role.
+
 ### Scheduled and HTML email
 
 `content_type` accepts `text/plain` (default) or `text/html` when sending.
@@ -770,6 +776,31 @@ email under `labels`.
 `DELETE /api/labels/{label-id}` deletes the tag and its mappings.
 
 All successful tag mutation endpoints return `{"ok":true}`.
+
+### Tags over IMAP and JMAP
+
+A tag is the protocol keyword of the messages that carry it, so a client sees and
+sets tags without a second vocabulary:
+
+- IMAP exposes each tag as a message keyword. `FETCH FLAGS` returns the tags
+  alongside the system flags, `STORE +FLAGS <tag>` applies a tag and
+  `STORE -FLAGS <tag>` removes it, `SEARCH KEYWORD <tag>` matches, and
+  `PERMANENTFLAGS` advertises `\*` because the server accepts keywords it did not
+  announce. A client storing an unseen keyword creates that tag, exactly as the
+  HTTP API would.
+- JMAP exposes tags as `keywords` on `Email` objects, accepts them in
+  `Email/set` `keywords/<tag>` patches and `Email/import`, and filters them with
+  `Email/query` `hasKeyword` / `notKeyword`.
+- A message keeps one folder and any number of tags; moving it between folders
+  carries its tags along.
+
+Two boundaries are deliberate. A tag whose name is not a legal IMAP keyword atom
+(spaces, `(`, `)`, `{`, `%`, `*`, `"`, `\`, `]`, control characters) is still a
+valid JMAP keyword but cannot travel over IMAP, where it is simply not shown. A
+tag name starting with `$` is reserved for scoped protocol keywords such as
+`$Junk`, so it is not projected to either protocol. Deleting the last message
+that carried a tag does not delete the tag: removing it everywhere empties it,
+and only `DELETE /api/labels/{label-id}` removes it.
 
 ## Credentials
 

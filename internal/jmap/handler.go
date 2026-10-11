@@ -469,13 +469,35 @@ func (h *Handler) emailSet(c *gin.Context, owner uuid.UUID, accountID string, ar
 			continue
 		}
 		flags := current.Flags
-		if value, exists := patch["keywords/$seen"]; exists {
-			flags = setFlag(flags, "\\Seen", value == true)
-		}
-		if value, exists := patch["keywords/$flagged"]; exists {
-			flags = setFlag(flags, "\\Flagged", value == true)
+		var addKeywords, removeKeywords []string
+		for key, value := range patch {
+			if !strings.HasPrefix(key, "keywords/") {
+				continue
+			}
+			name := strings.TrimPrefix(key, "keywords/")
+			switch name {
+			case "$seen":
+				flags = setFlag(flags, "\\Seen", value == true)
+			case "$flagged":
+				flags = setFlag(flags, "\\Flagged", value == true)
+			default:
+				// `$`-scoped keywords are protocol state, not user tags, and
+				// the ones this surface does not model stay unhandled.
+				if strings.HasPrefix(name, "$") {
+					continue
+				}
+				if value == true {
+					addKeywords = append(addKeywords, name)
+				} else {
+					removeKeywords = append(removeKeywords, name)
+				}
+			}
 		}
 		if _, err := h.mail.StoreProtocolFlags(c.Request.Context(), accountID, current.Folder.Name, []string{id}, flags, "replace", 0); err != nil {
+			notUpdated[id] = jmapError(err)
+			continue
+		}
+		if err := h.applyKeywordPatch(c.Request.Context(), accountID, current.Folder.Name, id, addKeywords, removeKeywords); err != nil {
 			notUpdated[id] = jmapError(err)
 			continue
 		}
@@ -515,6 +537,22 @@ func (h *Handler) emailSet(c *gin.Context, owner uuid.UUID, accountID string, ar
 		destroyed = append(destroyed, id)
 	}
 	return gin.H{"accountId": accountID, "oldState": h.state(c.Request.Context(), accountID), "newState": h.state(c.Request.Context(), accountID), "updated": updated, "notUpdated": notUpdated, "destroyed": destroyed, "notDestroyed": notDestroyed}
+}
+
+// applyKeywordPatch adds and removes tag keywords on one message. A keyword
+// creates its tag on first use; removing drops the mapping only.
+func (h *Handler) applyKeywordPatch(ctx context.Context, accountID, folderName, emailID string, add, remove []string) error {
+	if len(add) > 0 {
+		if err := h.mail.SetProtocolKeywords(ctx, accountID, folderName, []string{emailID}, add, "add"); err != nil {
+			return err
+		}
+	}
+	if len(remove) > 0 {
+		if err := h.mail.SetProtocolKeywords(ctx, accountID, folderName, []string{emailID}, remove, "remove"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (h *Handler) emailCopy(c *gin.Context, owner uuid.UUID, accountID string, args map[string]any) gin.H {
@@ -618,19 +656,22 @@ func (h *Handler) emailImport(c *gin.Context, accountID string, args map[string]
 			}
 		}
 		if kwMap, ok := entry["keywords"].(map[string]any); ok && len(kwMap) > 0 {
-			flags := []string{}
-			if kwMap["$seen"] == true {
-				flags = append(flags, "\\Seen")
+			// The import is fresh, so the requested keywords are its whole
+			// set. The `$`-system names translate to protocol flags first, then
+			// SplitProtocolFlags keeps a name that maps to a system flag from
+			// also becoming a tag.
+			names := make([]string, 0, len(kwMap))
+			for name, value := range kwMap {
+				if value != true {
+					continue
+				}
+				if flag, ok := systemKeywordFlags[strings.ToLower(name)]; ok {
+					names = append(names, flag)
+					continue
+				}
+				names = append(names, name)
 			}
-			if kwMap["$flagged"] == true {
-				flags = append(flags, "\\Flagged")
-			}
-			if kwMap["$answered"] == true {
-				flags = append(flags, "\\Answered")
-			}
-			if kwMap["$draft"] == true {
-				flags = append(flags, "\\Draft")
-			}
+			flags, keywords := service.SplitProtocolFlags(names)
 			folderName := currentRow.Folder.Name
 			if targetFolderID != "" {
 				if destFolder, ok := h.folder(c, accountID, targetFolderID); ok {
@@ -638,6 +679,10 @@ func (h *Handler) emailImport(c *gin.Context, accountID string, args map[string]
 				}
 			}
 			if _, err := h.mail.StoreProtocolFlags(ctx, accountID, folderName, []string{blobId}, flags, "replace", 0); err != nil {
+				notCreated[blobId] = jmapError(err)
+				continue
+			}
+			if err := h.applyKeywordPatch(ctx, accountID, folderName, blobId, keywords, nil); err != nil {
 				notCreated[blobId] = jmapError(err)
 				continue
 			}
@@ -1009,19 +1054,24 @@ type mailRow struct {
 	Email    database.Email
 	Folder   database.MailFolder
 	Flags    []string
+	Keywords []string
 	WireSize int64
 }
 
 func (h *Handler) rows(c *gin.Context, accountID string) ([]mailRow, error) {
 	type row struct {
-		database.Email
+		EmailID    string
 		FolderID   string
 		FolderName string
 		SpecialUse string
 		Flags      databaseJSON
 	}
 	var values []row
-	err := h.mail.DB().WithContext(c.Request.Context()).Table("folder_messages").Select("emails.*, mail_folders.id AS folder_id, mail_folders.name AS folder_name, mail_folders.special_use, folder_messages.flags").Joins("JOIN mail_folders ON mail_folders.id = folder_messages.folder_id").Joins("JOIN emails ON emails.id = folder_messages.email_id").Where("mail_folders.mailbox_id = ? AND emails.archived_at IS NULL", accountID).Order("emails.created_at DESC").Find(&values).Error
+	// Selecting emails.* into an embedded database.Email made GORM treat the
+	// membership query as soft-deletable and add a folder_messages.deleted_at
+	// predicate that no schema has; the joined email id is all this query
+	// needs, and the row is read in full below.
+	err := h.mail.DB().WithContext(c.Request.Context()).Table("folder_messages").Select("emails.id AS email_id, mail_folders.id AS folder_id, mail_folders.name AS folder_name, mail_folders.special_use, folder_messages.flags").Joins("JOIN mail_folders ON mail_folders.id = folder_messages.folder_id").Joins("JOIN emails ON emails.id = folder_messages.email_id").Where("mail_folders.mailbox_id = ? AND emails.archived_at IS NULL", accountID).Order("emails.created_at DESC").Find(&values).Error
 	if err != nil {
 		return nil, err
 	}
@@ -1029,8 +1079,8 @@ func (h *Handler) rows(c *gin.Context, accountID string) ([]mailRow, error) {
 	for _, v := range values {
 		var flags []string
 		_ = v.Flags.decode(&flags)
-		email := v.Email
-		if err := h.mail.DB().WithContext(c.Request.Context()).Preload("Recipients").Preload("Attachments").First(&email, "id = ?", email.ID).Error; err != nil {
+		var email database.Email
+		if err := h.mail.DB().WithContext(c.Request.Context()).Preload("Recipients").Preload("Attachments").First(&email, "id = ?", v.EmailID).Error; err != nil {
 			return nil, err
 		}
 		var source database.MessageSource
@@ -1038,6 +1088,19 @@ func (h *Handler) rows(c *gin.Context, accountID string) ([]mailRow, error) {
 			return nil, err
 		}
 		out = append(out, mailRow{Email: email, Folder: database.MailFolder{ID: v.FolderID, Name: v.FolderName, SpecialUse: v.SpecialUse}, Flags: flags, WireSize: source.WireSizeBytes})
+	}
+	// One query for every row's tag keywords: a per-row lookup would turn
+	// Email/get into a scan that grows with the mailbox.
+	ids := make([]string, len(out))
+	for i := range out {
+		ids[i] = out[i].Email.ID
+	}
+	keywords, err := h.mail.KeywordsForEmails(c.Request.Context(), ids)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].Keywords = keywords[out[i].Email.ID]
 	}
 	return out, nil
 }
@@ -1087,6 +1150,15 @@ func folderObject(f database.MailFolder) gin.H {
 	return gin.H{"id": f.ID, "name": f.Name, "parentId": nil, "role": role, "sortOrder": 0, "isSubscribed": f.Subscribed, "myRights": gin.H{"mayReadItems": true, "mayAddItems": false, "mayRemoveItems": true, "maySetSeen": true, "maySetKeywords": true, "mayCreateChild": false, "mayRename": false, "mayDelete": false, "maySubmit": true}}
 }
 
+// systemKeywordFlags maps the keywords RFC 8621 fixes for mail onto the
+// protocol flags the store keeps them as. Every other keyword is a tag.
+var systemKeywordFlags = map[string]string{
+	"$seen":     "\\Seen",
+	"$flagged":  "\\Flagged",
+	"$answered": "\\Answered",
+	"$draft":    "\\Draft",
+}
+
 func emailObject(r mailRow) gin.H {
 	keywords := gin.H{}
 	for _, f := range r.Flags {
@@ -1100,6 +1172,11 @@ func emailObject(r mailRow) gin.H {
 		case "\\Draft":
 			keywords["$draft"] = true
 		}
+	}
+	// Tags are already filtered of `$`-scoped names, so they never collide with
+	// the system keywords above. JMAP carries any name, spaces included.
+	for _, name := range r.Keywords {
+		keywords[name] = true
 	}
 	recipients := func(kind string) []any {
 		out := []any{}
@@ -1290,6 +1367,8 @@ func filterEmails(rows []mailRow, filter map[string]any) []string {
 	isUnread := filter["isUnread"]
 	isRead := filter["isRead"]
 	isFlagged := filter["isFlagged"]
+	hasKeyword := stringArg(filter, "hasKeyword")
+	notKeyword := stringArg(filter, "notKeyword")
 	hasAttachment := filter["hasAttachment"]
 
 	ids := []string{}
@@ -1376,12 +1455,44 @@ func filterEmails(rows []mailRow, filter map[string]any) []string {
 				continue
 			}
 		}
+		if hasKeyword != "" && !rowHasKeyword(row, hasKeyword) {
+			continue
+		}
+		if notKeyword != "" && rowHasKeyword(row, notKeyword) {
+			continue
+		}
 		if hasAttachment == true && len(row.Email.Attachments) == 0 {
 			continue
 		}
 		ids = append(ids, row.Email.ID)
 	}
 	return ids
+}
+
+// rowHasKeyword resolves a JMAP keyword against both surfaces a message
+// carries: the protocol flags the `$`-system keywords map onto, and the tag
+// names. Comparison folds case, as RFC 8620 keywords are case-insensitive.
+func rowHasKeyword(row mailRow, keyword string) bool {
+	if flag, ok := systemKeywordFlags[strings.ToLower(keyword)]; ok {
+		for _, f := range row.Flags {
+			if f == flag {
+				return true
+			}
+		}
+		return false
+	}
+	// `$`-scoped client keywords such as $Junk live in the flags, not the tags.
+	for _, f := range row.Flags {
+		if strings.EqualFold(f, keyword) {
+			return true
+		}
+	}
+	for _, name := range row.Keywords {
+		if strings.EqualFold(name, keyword) {
+			return true
+		}
+	}
+	return false
 }
 
 func sortEmails(rows []mailRow, ids []string, field string, ascending bool) {

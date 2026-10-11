@@ -37,6 +37,7 @@ type Backend interface {
 	DeleteProtocolMessages(context.Context, string, string, []string) error
 	CopyProtocolMessages(context.Context, string, string, string, []string) error
 	StoreProtocolFlags(context.Context, string, string, []string, []string, string, uint64) ([]service.ProtocolStoreResult, error)
+	SetProtocolKeywords(context.Context, string, string, []string, []string, string) error
 }
 
 // Server delegates command parsing, literals, STARTTLS, SASL PLAIN, and IMAP
@@ -139,9 +140,7 @@ type imapMailbox struct {
 func (m *imapMailbox) Name() string { return m.name }
 func (m *imapMailbox) Info() (*goimap.MailboxInfo, error) {
 	attrs := []string{goimap.HasNoChildrenAttr}
-	if v := imapSpecialUse(m.folder.SpecialUse); v != "" {
-		attrs = append(attrs, v)
-	}
+	attrs = append(attrs, specialUseAttributes(m.folder.SpecialUse)...)
 	return &goimap.MailboxInfo{Name: m.name, Delimiter: "/", Attributes: attrs}, nil
 }
 func (m *imapMailbox) messages() ([]service.ProtocolMessage, *database.MailFolder, error) {
@@ -160,7 +159,9 @@ func (m *imapMailbox) Status(items []goimap.StatusItem) (*goimap.MailboxStatus, 
 	}
 	st := goimap.NewMailboxStatus(m.name, items)
 	st.Flags = []string{goimap.SeenFlag, goimap.AnsweredFlag, goimap.FlaggedFlag, goimap.DeletedFlag, goimap.DraftFlag}
-	st.PermanentFlags = append([]string{}, st.Flags...)
+	// RFC 3501: `\*` in PERMANENTFLAGS tells a client it may create keywords,
+	// which is the only way it can apply a tag the server has not sent it.
+	st.PermanentFlags = append(append([]string{}, st.Flags...), goimap.TryCreateFlag)
 	st.Messages = uint32(len(msgs))
 	st.Unseen = unseen
 	st.UidNext = f.NextUID
@@ -193,7 +194,7 @@ func (m *imapMailbox) ListMessages(uid bool, set *goimap.SeqSet, items []goimap.
 		}
 		msg := goimap.NewMessage(uint32(i+1), items)
 		msg.Uid = x.UID
-		msg.Flags = x.Flags
+		msg.Flags = protocolFlags(x)
 		msg.Size = uint32(x.RFC822Size)
 		msg.InternalDate = time.Now()
 		msg.Body = map[*goimap.BodySectionName]goimap.Literal{}
@@ -409,8 +410,14 @@ func (m *imapMailbox) UpdateMessagesFlags(uid bool, set *goimap.SeqSet, op goima
 	if op == goimap.RemoveFlags {
 		mode = "remove"
 	}
-	_, err = m.user.backend.StoreProtocolFlags(context.Background(), m.user.mailboxID, m.name, ids, flags, mode, 0)
-	return err
+	// A STORE carries two kinds of name: the membership's own flags and tag
+	// keywords. They live in different tables, so each half goes to the store
+	// that owns it, under the same mode.
+	stored, keywords := service.SplitProtocolFlags(flags)
+	if _, err := m.user.backend.StoreProtocolFlags(context.Background(), m.user.mailboxID, m.name, ids, stored, mode, 0); err != nil {
+		return err
+	}
+	return m.user.backend.SetProtocolKeywords(context.Background(), m.user.mailboxID, m.name, ids, keywords, mode)
 }
 func (m *imapMailbox) CopyMessages(uid bool, set *goimap.SeqSet, dest string) error {
 	return m.transfer(uid, set, dest, false)
@@ -462,8 +469,41 @@ type literal struct {
 	n int
 }
 
-func (l literal) Len() int               { return l.n }
-func imapSpecialUse(value string) string { return strings.TrimPrefix(value, `\`) }
+func (l literal) Len() int { return l.n }
+
+// specialUseAttributes maps the stored special-use value to the RFC 6154
+// attributes a LIST response carries. The attribute keeps its leading
+// backslash: go-imap writes attribute strings verbatim, so a de-backslashed
+// value is an unknown atom no client can act on. INBOX carries no special-use
+// attribute in RFC 6154 and `\Inbox` is not one, so it maps to nothing; clients
+// identify INBOX by name.
+func specialUseAttributes(value string) []string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case `\sent`:
+		return []string{goimap.SentAttr}
+	case `\drafts`:
+		return []string{goimap.DraftsAttr}
+	case `\junk`:
+		return []string{goimap.JunkAttr}
+	case `\trash`:
+		return []string{goimap.TrashAttr}
+	case `\archive`:
+		return []string{goimap.ArchiveAttr}
+	default:
+		return nil
+	}
+}
+
+// protocolFlags is the flag list a client sees for one message: the
+// membership's own flags plus the tag keywords it carries. Tags live only in
+// the label mappings, so this projection is where the two namespaces meet, and
+// every client-visible flag view goes through it.
+func protocolFlags(m service.ProtocolMessage) []string {
+	flags := make([]string, 0, len(m.Flags)+len(m.Keywords))
+	flags = append(flags, m.Flags...)
+	return append(flags, m.Keywords...)
+}
+
 func hasFlag(flags []string, flag string) bool {
 	for _, v := range flags {
 		if strings.EqualFold(v, flag) {
@@ -476,13 +516,14 @@ func matchesCriteria(m service.ProtocolMessage, c *goimap.SearchCriteria) bool {
 	if c.Uid != nil && !c.Uid.Contains(m.UID) {
 		return false
 	}
+	flags := protocolFlags(m)
 	for _, f := range c.WithFlags {
-		if !hasFlag(m.Flags, f) {
+		if !hasFlag(flags, f) {
 			return false
 		}
 	}
 	for _, f := range c.WithoutFlags {
-		if hasFlag(m.Flags, f) {
+		if hasFlag(flags, f) {
 			return false
 		}
 	}

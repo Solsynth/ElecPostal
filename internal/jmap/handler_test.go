@@ -1,12 +1,22 @@
 package jmap
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"gorm.io/datatypes"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
+
 	"src.solsynth.dev/sosys/elecpostal/internal/database"
+	"src.solsynth.dev/sosys/elecpostal/internal/service"
 )
 
 func TestEmailObjectMapsProtocolState(t *testing.T) {
@@ -461,5 +471,220 @@ func TestEmailObjectPreviewUsesTheStoredSummary(t *testing.T) {
 	})
 	if got := result["preview"]; got != "Acme shipped three features this week" {
 		t.Fatalf("preview = %v, want the stored summary", got)
+	}
+}
+
+// ── Tag keywords ─────────────────────────────────────────────────────────
+
+func TestEmailObjectIncludesTagKeywords(t *testing.T) {
+	thread := "thread-tagged"
+	result := emailObject(mailRow{
+		Email: database.Email{
+			ID: "email-tagged", ThreadID: &thread, Subject: "Tagged", Body: "Body",
+			FromAddress: "sender@example.test", CreatedAt: time.Now(),
+		},
+		Folder:   database.MailFolder{ID: "inbox"},
+		Flags:    []string{"\\Seen"},
+		Keywords: []string{"todo", "needs reply"},
+	})
+	keywords := result["keywords"].(gin.H)
+	if keywords["$seen"] != true {
+		t.Fatalf("system keyword lost: %#v", keywords)
+	}
+	// JMAP carries any keyword name, spaces included.
+	if keywords["todo"] != true || keywords["needs reply"] != true {
+		t.Fatalf("tag keywords missing: %#v", keywords)
+	}
+}
+
+func TestFilterEmailsHasKeyword(t *testing.T) {
+	rows := []mailRow{
+		{Email: database.Email{ID: "e1"}, Folder: database.MailFolder{ID: "inbox"}, Keywords: []string{"todo"}},
+		{Email: database.Email{ID: "e2"}, Folder: database.MailFolder{ID: "inbox"}, Keywords: []string{"Receipts"}},
+		{Email: database.Email{ID: "e3"}, Folder: database.MailFolder{ID: "inbox"}},
+	}
+	// Keywords fold case, so an uppercased request still matches the stored tag.
+	ids := filterEmails(rows, map[string]any{"hasKeyword": "TODO"})
+	if len(ids) != 1 || ids[0] != "e1" {
+		t.Fatalf("expected [e1], got %v", ids)
+	}
+}
+
+func TestFilterEmailsHasKeywordSystemFlag(t *testing.T) {
+	rows := []mailRow{
+		{Email: database.Email{ID: "e1"}, Folder: database.MailFolder{ID: "inbox"}, Flags: []string{"\\Seen"}},
+		{Email: database.Email{ID: "e2"}, Folder: database.MailFolder{ID: "inbox"}, Flags: []string{}},
+	}
+	ids := filterEmails(rows, map[string]any{"hasKeyword": "$seen"})
+	if len(ids) != 1 || ids[0] != "e1" {
+		t.Fatalf("expected [e1], got %v", ids)
+	}
+}
+
+func TestFilterEmailsNotKeyword(t *testing.T) {
+	rows := []mailRow{
+		{Email: database.Email{ID: "e1"}, Folder: database.MailFolder{ID: "inbox"}, Keywords: []string{"todo"}},
+		{Email: database.Email{ID: "e2"}, Folder: database.MailFolder{ID: "inbox"}, Keywords: []string{"Receipts"}},
+	}
+	ids := filterEmails(rows, map[string]any{"notKeyword": "todo"})
+	if len(ids) != 1 || ids[0] != "e2" {
+		t.Fatalf("expected [e2], got %v", ids)
+	}
+}
+
+// newKeywordTestHandler builds an in-memory store holding one mailbox with an
+// INBOX: the smallest fixture the keyword wiring reaches through.
+func newKeywordTestHandler(t *testing.T) (*Handler, *gorm.DB, database.Mailbox, database.MailFolder) {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open("file:"+database.NewID()+"?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("gorm.Open() error = %v", err)
+	}
+	if err := db.AutoMigrate(
+		&database.Mailbox{}, &database.Email{}, &database.Recipient{}, &database.Attachment{},
+		&database.MessageSource{}, &database.MailFolder{}, &database.FolderMessage{},
+		&database.EmailLabel{}, &database.EmailLabelMapping{},
+	); err != nil {
+		t.Fatalf("AutoMigrate() error = %v", err)
+	}
+	accountID := uuid.New()
+	mailbox := database.Mailbox{ID: database.NewID(), AccountID: accountID, WorkspaceID: "workspace-a", Address: "ada@example.com", Name: "Ada"}
+	if err := db.Create(&mailbox).Error; err != nil {
+		t.Fatalf("create mailbox: %v", err)
+	}
+	folder := database.MailFolder{MailboxID: mailbox.ID, Name: "INBOX", SpecialUse: `\Inbox`, NextUID: 1, HighestModSeq: 1}
+	if err := db.Create(&folder).Error; err != nil {
+		t.Fatalf("create folder: %v", err)
+	}
+	return New(service.NewEmailService(&database.DB{DB: db}, nil)), db, mailbox, folder
+}
+
+// seedKeywordEmail stores one message, its protocol source, and its INBOX
+// membership, which is what rows() reads.
+func seedKeywordEmail(t *testing.T, db *gorm.DB, mailbox database.Mailbox, folder database.MailFolder, subject string) database.Email {
+	t.Helper()
+	email := database.Email{
+		ID: database.NewID(), AccountID: mailbox.AccountID, MailboxID: mailbox.ID,
+		Subject: subject, Body: "Body", Folder: folder.Name,
+		FromAddress: "sender@example.test",
+	}
+	if err := db.Create(&email).Error; err != nil {
+		t.Fatalf("create email: %v", err)
+	}
+	source := database.MessageSource{EmailID: email.ID, WireSizeBytes: 128, ReceivedAt: email.CreatedAt}
+	if err := db.Create(&source).Error; err != nil {
+		t.Fatalf("create message source: %v", err)
+	}
+	var members int64
+	if err := db.Model(&database.FolderMessage{}).Where("folder_id = ?", folder.ID).Count(&members).Error; err != nil {
+		t.Fatalf("count memberships: %v", err)
+	}
+	membership := database.FolderMessage{
+		FolderID: folder.ID, EmailID: email.ID, UID: uint32(members) + 1,
+		Flags: datatypes.JSON([]byte("[]")), ModSeq: folder.HighestModSeq,
+	}
+	if err := db.Create(&membership).Error; err != nil {
+		t.Fatalf("create membership: %v", err)
+	}
+	return email
+}
+
+func keywordTags(t *testing.T, h *Handler, emailID string) []string {
+	t.Helper()
+	byEmail, err := h.mail.KeywordsForEmails(context.Background(), []string{emailID})
+	if err != nil {
+		t.Fatalf("KeywordsForEmails() error = %v", err)
+	}
+	return byEmail[emailID]
+}
+
+func membershipFlagsOf(t *testing.T, db *gorm.DB, folderID, emailID string) []string {
+	t.Helper()
+	var membership database.FolderMessage
+	if err := db.Where("folder_id = ? AND email_id = ?", folderID, emailID).First(&membership).Error; err != nil {
+		t.Fatalf("load membership: %v", err)
+	}
+	var flags []string
+	if err := json.Unmarshal(membership.Flags, &flags); err != nil {
+		t.Fatalf("decode flags: %v", err)
+	}
+	return flags
+}
+
+func newKeywordTestContext() *gin.Context {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/jmap/api", nil)
+	return c
+}
+
+func TestEmailSetKeywordPatchAddsAndRemovesTag(t *testing.T) {
+	h, db, mailbox, folder := newKeywordTestHandler(t)
+	email := seedKeywordEmail(t, db, mailbox, folder, "Tagged")
+	// An unrelated tag proves the patch adds to the message's tag set instead
+	// of replacing it.
+	if err := h.mail.SetProtocolKeywords(context.Background(), mailbox.ID, folder.Name, []string{email.ID}, []string{"keep"}, "add"); err != nil {
+		t.Fatalf("SetProtocolKeywords() error = %v", err)
+	}
+	c := newKeywordTestContext()
+
+	result := h.emailSet(c, uuid.Nil, mailbox.ID, map[string]any{
+		"update": map[string]any{email.ID: map[string]any{"keywords/todo": true}},
+	})
+	if _, ok := result["updated"].(gin.H)[email.ID]; !ok {
+		t.Fatalf("keyword add not applied: %#v", result)
+	}
+	if tags := keywordTags(t, h, email.ID); strings.Join(tags, ",") != "keep,todo" {
+		t.Fatalf("tags after add = %v, want [keep todo]", tags)
+	}
+
+	result = h.emailSet(c, uuid.Nil, mailbox.ID, map[string]any{
+		"update": map[string]any{email.ID: map[string]any{"keywords/todo": false}},
+	})
+	if _, ok := result["updated"].(gin.H)[email.ID]; !ok {
+		t.Fatalf("keyword remove not applied: %#v", result)
+	}
+	if tags := keywordTags(t, h, email.ID); strings.Join(tags, ",") != "keep" {
+		t.Fatalf("tags after remove = %v, want [keep]", tags)
+	}
+}
+
+func TestEmailQueryHasKeywordReturnsTaggedMail(t *testing.T) {
+	h, db, mailbox, folder := newKeywordTestHandler(t)
+	tagged := seedKeywordEmail(t, db, mailbox, folder, "Tagged")
+	seedKeywordEmail(t, db, mailbox, folder, "Untagged")
+	if err := h.mail.SetProtocolKeywords(context.Background(), mailbox.ID, folder.Name, []string{tagged.ID}, []string{"todo"}, "add"); err != nil {
+		t.Fatalf("SetProtocolKeywords() error = %v", err)
+	}
+	c := newKeywordTestContext()
+
+	result := h.emailQuery(c, mailbox.ID, map[string]any{"filter": map[string]any{"hasKeyword": "todo"}})
+	ids, _ := result["ids"].([]string)
+	if len(ids) != 1 || ids[0] != tagged.ID {
+		t.Fatalf("hasKeyword ids = %v, want [%s]", ids, tagged.ID)
+	}
+}
+
+func TestEmailImportRoutesTagKeywordsAndSystemFlags(t *testing.T) {
+	h, db, mailbox, folder := newKeywordTestHandler(t)
+	email := seedKeywordEmail(t, db, mailbox, folder, "Imported")
+	c := newKeywordTestContext()
+
+	result := h.emailImport(c, mailbox.ID, map[string]any{
+		"emails": []any{map[string]any{
+			"blobId":   email.ID,
+			"keywords": map[string]any{"$seen": true, "$Junk": true, "todo": true},
+		}},
+	})
+	if _, ok := result["created"].(gin.H)[email.ID]; !ok {
+		t.Fatalf("import not applied: %#v", result)
+	}
+	flags := membershipFlagsOf(t, db, folder.ID, email.ID)
+	if strings.Join(flags, ",") != "$Junk,\\Seen" {
+		t.Fatalf("flags = %v, want the system flag and the scoped keyword only", flags)
+	}
+	// A keyword that became a flag must not also become a tag.
+	if tags := keywordTags(t, h, email.ID); len(tags) != 1 || tags[0] != "todo" {
+		t.Fatalf("tags after import = %v, want [todo]", tags)
 	}
 }

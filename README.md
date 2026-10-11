@@ -83,7 +83,8 @@ Configure TLS certificates for all enabled SMTP, IMAP, and POP3 listeners.
 
 JMAP is available over the main HTTPS listener at `GET /jmap/session` and
 `POST /jmap/api`. It uses the same bearer-token authentication as the REST API.
-Each hosted address is a JMAP account and IMAP folders are JMAP Mailboxes.
+Each hosted address is a JMAP account and IMAP folders are JMAP Mailboxes. Tags
+are the IMAP keywords and JMAP keywords of the messages that carry them.
 This initial support includes `Core/echo`, `Mailbox/get`, `Mailbox/query`,
 `Email/get`, `Email/query`, and `Email/set` for flags, moves, trashing, and
 destroying mail that already sits in Trash. JMAP reads and updates the same

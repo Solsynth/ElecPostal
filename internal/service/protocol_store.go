@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -28,10 +29,13 @@ var defaultProtocolFolders = []struct{ name, use string }{
 
 // ProtocolMessage is the lightweight protocol-facing mailbox view. The
 // message bytes are rendered from its manifest when a client fetches it.
+// Flags holds the membership's own flags; Keywords holds the tag names the
+// account filed the message under, which IMAP and JMAP expose as keywords.
 type ProtocolMessage struct {
 	EmailID    string
 	UID        uint32
 	Flags      []string
+	Keywords   []string
 	RFC822Size int64
 	Subject    string
 	Body       string
@@ -300,6 +304,19 @@ func (s *EmailService) ListProtocolFolder(ctx context.Context, mailboxID, name s
 		_ = json.Unmarshal(row.Flags, &flags)
 		items = append(items, ProtocolMessage{EmailID: row.EmailID, UID: row.UID, Flags: flags, RFC822Size: row.WireSizeBytes, Subject: row.Subject, Body: row.Body, ModSeq: row.ModSeq})
 	}
+	// The tags of a message are account-wide, so a client sees the same
+	// keywords for it in every folder it appears in.
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		ids = append(ids, item.EmailID)
+	}
+	keywords, err := s.protocolKeywordsByEmail(ctx, ids)
+	if err != nil {
+		return nil, nil, err
+	}
+	for i := range items {
+		items[i].Keywords = keywords[items[i].EmailID]
+	}
 	return items, &folder, nil
 }
 
@@ -400,7 +417,22 @@ func (s *EmailService) MoveProtocolMessages(ctx context.Context, mailboxID, from
 		if err := tx.Save(&source).Error; err != nil {
 			return err
 		}
-		return tx.Save(&target).Error
+		if err := tx.Save(&target).Error; err != nil {
+			return err
+		}
+		// A client move has to land in the HTTP app too, or the app keeps
+		// listing the message in the folder it just left. Protocol-only folders
+		// have no HTTP folder to record, so they leave emails.folder alone.
+		httpFolder, ok := httpFolderForProtocolName(to)
+		if !ok {
+			return nil
+		}
+		moved := make([]string, 0, len(rows))
+		for _, row := range rows {
+			moved = append(moved, row.EmailID)
+		}
+		_, err := updateEmailFolderTx(tx, mailboxID, moved, httpFolder)
+		return err
 	})
 }
 
@@ -614,8 +646,14 @@ func (s *EmailService) AppendProtocolMessage(ctx context.Context, mailboxID, fol
 		if err := s.storeProtocolSourceTx(tx, &email, nil, ""); err != nil {
 			return err
 		}
-		uid, modSeq, err = s.appendFolderMembershipTx(tx, mailbox.ID, folderName, email.ID, flags, date)
-		return err
+		// A client that APPENDs with a keyword is filing the message under that
+		// tag, so the keyword becomes a tag mapping instead of an opaque flag.
+		storedFlags, tagNames := SplitProtocolFlags(flags)
+		uid, modSeq, err = s.appendFolderMembershipTx(tx, mailbox.ID, folderName, email.ID, storedFlags, date)
+		if err != nil {
+			return err
+		}
+		return s.setProtocolKeywordsTx(tx, mailbox.AccountID, []string{email.ID}, normalizeKeywords(tagNames), "add")
 	})
 	if err != nil {
 		for _, reference := range staged {
@@ -650,22 +688,36 @@ func (s *EmailService) appendFolderMembershipTx(tx *gorm.DB, mailboxID, name, em
 	return uid, modSeq, nil
 }
 
-// httpFolderName maps an IMAP folder name back to the HTTP mailbox folder.
-func httpFolderName(folder string) string {
+// httpFolderForProtocolName maps an IMAP folder name back to the HTTP mailbox
+// folder. The second result is false for a protocol-only folder — one created
+// through JMAP Mailbox/set — which the HTTP mail model cannot express.
+func httpFolderForProtocolName(folder string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(folder)) {
+	case "inbox":
+		return folderInbox, true
 	case "sent":
-		return folderSent
+		return folderSent, true
 	case "drafts":
-		return folderDrafts
+		return folderDrafts, true
 	case "spam":
-		return folderSpam
+		return folderSpam, true
 	case "trash":
-		return folderTrash
+		return folderTrash, true
 	case "archive":
-		return folderArchive
+		return folderArchive, true
 	default:
-		return folderInbox
+		return "", false
 	}
+}
+
+// httpFolderName maps an IMAP folder name back to the HTTP mailbox folder.
+// Protocol-only folders fall back to INBOX, because a stored message always
+// carries one of the HTTP folders.
+func httpFolderName(folder string) string {
+	if name, ok := httpFolderForProtocolName(folder); ok {
+		return name
+	}
+	return folderInbox
 }
 
 func hasSystemFlag(flags []string, flag string) bool {
@@ -740,6 +792,123 @@ func (s *EmailService) addFolderMembershipTx(tx *gorm.DB, mailboxID, name, email
 		return err
 	}
 	return tx.Model(&database.MailFolder{}).Where("id = ?", folder.ID).Updates(map[string]any{"next_uid": uid + 1, "highest_mod_seq": modseq}).Error
+}
+
+// moveEmailFolderTx is the one place a stored message changes folder. It writes
+// both sides of the folder model in the caller's transaction: the
+// emails.folder column and its timestamps, which the HTTP app lists by, and the
+// protocol folder membership an IMAP or JMAP client reads. A message that moves
+// on only one side is either missing from the client's Spam folder or still
+// sitting in its INBOX. It reports how many message rows changed, so a caller
+// can tell a missing message from a completed move.
+func (s *EmailService) moveEmailFolderTx(tx *gorm.DB, accountID uuid.UUID, id, folder string) (int64, error) {
+	var email database.Email
+	if err := tx.Clauses(clauseLock()).Select("id", "mailbox_id", "is_read", "is_starred", "is_draft").
+		Where("id = ? AND account_id = ?", id, accountID).First(&email).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	if err := s.relocateFolderMembershipTx(tx, email, protocolFolderName(folder)); err != nil {
+		return 0, err
+	}
+	return updateEmailFolderTx(tx, email.MailboxID, []string{email.ID}, folder)
+}
+
+// updateEmailFolderTx records folder as the HTTP folder of the listed messages,
+// mirroring the timestamps a move to Trash or Spam sets. It is the HTTP half of
+// a folder change, for callers that moved the protocol membership themselves.
+func updateEmailFolderTx(tx *gorm.DB, mailboxID string, emailIDs []string, folder string) (int64, error) {
+	if len(emailIDs) == 0 {
+		return 0, nil
+	}
+	updates := map[string]any{"folder": folder}
+	switch folder {
+	case folderTrash:
+		updates["trashed_at"] = time.Now()
+	case folderSpam:
+		updates["spam_at"] = time.Now()
+	default:
+		updates["trashed_at"] = nil
+	}
+	result := tx.Model(&database.Email{}).Where("mailbox_id = ? AND id IN ?", mailboxID, emailIDs).Updates(updates)
+	return result.RowsAffected, result.Error
+}
+
+// relocateFolderMembershipTx files a stored message into protocolFolder, taking
+// it out of the folders it held in that mailbox and carrying its flags across,
+// as RFC 3501 requires of a move. Folders that lose the message get a new
+// mod-sequence so CONDSTORE clients notice. It is deliberately "wherever the
+// message was" rather than "out of one named folder": the HTTP folder model
+// keeps one folder per message, so this also repairs a message whose two sides
+// had already drifted apart.
+func (s *EmailService) relocateFolderMembershipTx(tx *gorm.DB, email database.Email, protocolFolder string) error {
+	if err := s.ensureProtocolFoldersTx(tx, email.MailboxID); err != nil {
+		return err
+	}
+	var target database.MailFolder
+	if err := tx.Clauses(clauseLock()).Where("mailbox_id = ? AND name = ?", email.MailboxID, protocolFolder).First(&target).Error; err != nil {
+		return err
+	}
+	inMailbox := tx.Model(&database.MailFolder{}).Select("id").Where("mailbox_id = ?", email.MailboxID)
+	var rows []database.FolderMessage
+	if err := tx.Clauses(clauseLock()).Where("email_id = ? AND folder_id IN (?)", email.ID, inMailbox).Find(&rows).Error; err != nil {
+		return err
+	}
+	var flags datatypes.JSON
+	present := false
+	displaced := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if row.FolderID == target.ID {
+			present = true
+		} else {
+			displaced = append(displaced, row.FolderID)
+		}
+		if len(flags) == 0 {
+			flags = row.Flags
+		}
+	}
+	if present && len(displaced) == 0 {
+		return nil
+	}
+	if len(displaced) > 0 {
+		if err := tx.Where("email_id = ? AND folder_id IN ?", email.ID, displaced).Delete(&database.FolderMessage{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&database.MailFolder{}).Where("id IN ?", displaced).UpdateColumn("highest_mod_seq", gorm.Expr("highest_mod_seq + 1")).Error; err != nil {
+			return err
+		}
+	}
+	if present {
+		return nil
+	}
+	if len(flags) == 0 {
+		// No membership carried flags, so the HTTP mail state is the only
+		// record of what the message had seen, starred, or drafted.
+		flags = datatypes.JSON(marshalFlags(emailFolderFlags(email)))
+	}
+	uid, modseq := target.NextUID, target.HighestModSeq+1
+	if err := tx.Create(&database.FolderMessage{FolderID: target.ID, EmailID: email.ID, UID: uid, Flags: flags, ModSeq: modseq}).Error; err != nil {
+		return err
+	}
+	return tx.Model(&database.MailFolder{}).Where("id = ?", target.ID).Updates(map[string]any{"next_uid": uid + 1, "highest_mod_seq": modseq}).Error
+}
+
+// emailFolderFlags renders the protocol flags implied by the HTTP message
+// state. It is the fallback for a message with no membership to inherit from.
+func emailFolderFlags(email database.Email) []string {
+	var flags []string
+	if email.IsRead {
+		flags = append(flags, `\Seen`)
+	}
+	if email.IsStarred {
+		flags = append(flags, `\Flagged`)
+	}
+	if email.IsDraft {
+		flags = append(flags, `\Draft`)
+	}
+	return flags
 }
 
 // clauseLock is kept local so protocol mutations consistently serialize UID

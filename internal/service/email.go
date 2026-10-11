@@ -2176,7 +2176,10 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 		if isDmarcIntake {
 			return nil
 		}
-		return s.addInboxMembershipTx(tx, mailbox.ID, email.ID)
+		// The spam filter may already have routed this message, so the protocol
+		// folder has to follow emails.folder: filing every message into INBOX
+		// left the client showing spam in INBOX and its Spam folder empty.
+		return s.addFolderMembershipTx(tx, mailbox.ID, protocolFolderName(email.Folder), email.ID)
 	})
 	if err != nil {
 		for _, reference := range stagedReferences {
@@ -2485,12 +2488,15 @@ func (s *EmailService) resolveAttachmentReferences(ctx context.Context, mailbox 
 // separate, explicit call (see DeleteEmailPermanently) so an accidental delete
 // stays recoverable.
 func (s *EmailService) DeleteEmail(ctx context.Context, accountID uuid.UUID, id string) error {
-	now := time.Now()
-	result := s.db.WithContext(ctx).Model(&database.Email{}).Where("id = ? AND account_id = ?", id, accountID).Updates(map[string]any{"folder": folderTrash, "trashed_at": now})
-	if result.Error != nil {
-		return result.Error
+	updated := int64(0)
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var err error
+		updated, err = s.moveEmailFolderTx(tx, accountID, id, folderTrash)
+		return err
+	}); err != nil {
+		return err
 	}
-	if result.RowsAffected == 0 {
+	if updated == 0 {
 		return ErrNotFound
 	}
 	return nil
@@ -2658,14 +2664,17 @@ func (s *EmailService) deleteUnreferencedAttachments(ctx context.Context, fileID
 	}
 }
 
-// MoveEmail changes a message's mailbox folder and records the relevant state.
+// MoveEmail moves a message into folder on both sides of the folder model: the
+// folder the HTTP app lists by, and the protocol folder an IMAP or JMAP client
+// sees. A move that only reached one side left the message visible in the wrong
+// folder on the other.
 func (s *EmailService) MoveEmail(ctx context.Context, accountID uuid.UUID, id, folder string) error {
 	folder = strings.ToLower(strings.TrimSpace(folder))
 	if !validFolder(folder) {
 		return fmt.Errorf("invalid folder")
 	}
 	// The previous folder decides whether this move is a spam/ham training
-	// signal. A missing row falls through to the RowsAffected check below.
+	// signal. A missing message falls through to the moved-row count below.
 	var current database.Email
 	if s.spamScorer != nil {
 		if err := s.db.WithContext(ctx).
@@ -2674,21 +2683,15 @@ func (s *EmailService) MoveEmail(ctx context.Context, accountID uuid.UUID, id, f
 			return err
 		}
 	}
-	updates := map[string]any{"folder": folder}
-	now := time.Now()
-	switch folder {
-	case folderTrash:
-		updates["trashed_at"] = now
-	case folderSpam:
-		updates["spam_at"] = now
-	default:
-		updates["trashed_at"] = nil
+	updated := int64(0)
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var err error
+		updated, err = s.moveEmailFolderTx(tx, accountID, id, folder)
+		return err
+	}); err != nil {
+		return err
 	}
-	result := s.db.WithContext(ctx).Model(&database.Email{}).Where("id = ? AND account_id = ?", id, accountID).Updates(updates)
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
+	if updated == 0 {
 		return ErrNotFound
 	}
 	if s.realtime != nil {
