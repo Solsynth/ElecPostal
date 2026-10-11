@@ -115,9 +115,9 @@ type IncomingAttachment struct {
 // MailboxID identifies the local destination; ownership is never supplied by
 // the caller and is always resolved from that mailbox.
 type ReceiveEmailInput struct {
-	MailboxID            string
-	ThreadID             string
-	MessageID            string
+	MailboxID string
+	ThreadID  string
+	MessageID string
 	// InReplyTo and References are the normalized RFC 5322 reply chain of the
 	// incoming message (message-ids without angle brackets). They let the
 	// service attach the message to the conversation it answers even when the
@@ -259,32 +259,36 @@ type WorkspaceCustomDomainUsage struct {
 
 // EmailService handles email-related business logic.
 type EmailService struct {
-	db                *database.DB
-	notifier          NotificationSender
-	realtime          realtime.Publisher
-	files             filesystem.ByteStore
-	relay             relay.Adapter
-	workspace         workspace.Provider
-	sharedQuotaClient gen.DyQuotaServiceClient
-	identities        relay.IdentityManager
-	language          account.Provider
-	summarizer        personality.Summarizer
-	spamScorer        spam.Scorer
-	spamThreshold     float64
-	spamXSpamHeader   bool
-	domain            string
-	inbound           string
-	dns               relay.DNSChecker
-	dnsLabel          string
+	db                     *database.DB
+	notifier               NotificationSender
+	realtime               realtime.Publisher
+	files                  filesystem.ByteStore
+	relay                  relay.Adapter
+	workspace              workspace.Provider
+	sharedQuotaClient      gen.DyQuotaServiceClient
+	identities             relay.IdentityManager
+	language               account.Provider
+	summarizer             personality.Summarizer
+	spamScorer             spam.Scorer
+	spamThreshold          float64
+	spamXSpamHeader        bool
+	spamEnforceDmarcReject bool
+	domain                 string
+	inbound                string
+	dns                    relay.DNSChecker
+	dnsLabel               string
 }
 
 // SetSpamScorer installs the inbound spam filter and its routing threshold.
-// addXSpamHeader controls whether stored spam carries X-Spam-Status/Score
-// headers. A nil scorer keeps the legacy block-rule and phrase routing.
-func (s *EmailService) SetSpamScorer(scorer spam.Scorer, threshold float64, addXSpamHeader bool) {
+// addXSpamHeader controls whether stored mail carries filter verdict headers.
+// enforceDmarcReject routes mail from a domain publishing a DMARC reject policy
+// into Spam regardless of score. A nil scorer keeps the legacy block-rule and
+// phrase routing.
+func (s *EmailService) SetSpamScorer(scorer spam.Scorer, threshold float64, addXSpamHeader, enforceDmarcReject bool) {
 	s.spamScorer = scorer
 	s.spamThreshold = threshold
 	s.spamXSpamHeader = addXSpamHeader
+	s.spamEnforceDmarcReject = enforceDmarcReject
 }
 
 // SetRelay configures outbound delivery. A nil adapter retains the existing
@@ -2099,6 +2103,7 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 		isBlocked := s.isBlocked(ctx, mailbox, input.FromAddress)
 		routedToSpam := isBlocked
 		score := 0.0
+		phishingReason := ""
 		var symbols []spam.Symbol
 		if s.spamScorer != nil {
 			scoreCtx, cancel := context.WithTimeout(ctx, spamScoreTimeout)
@@ -2114,7 +2119,14 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 			})
 			cancel()
 			score, symbols = result.Score, result.Symbols
-			routedToSpam = isBlocked || score >= s.spamThreshold
+			// A domain publishing p=reject has declared that unauthenticated mail
+			// from it is forged. That verdict is terminal: it routes the message
+			// to Spam on its own, because the weighted score alone never reaches
+			// the threshold for an exact-domain spoof (the auth symbols cap below
+			// it).
+			phishingReason = spam.PhishingReason(input.Authentication)
+			routedToSpam = isBlocked || score >= s.spamThreshold ||
+				(s.spamEnforceDmarcReject && phishingReason != "")
 		} else if legacySpamPhraseMatch(input.Subject, input.Body) {
 			// No scorer configured: the historic behavior is preserved exactly.
 			routedToSpam = true
@@ -2126,6 +2138,9 @@ func (s *EmailService) ReceiveEmail(ctx context.Context, input ReceiveEmailInput
 		}
 		if s.spamScorer != nil {
 			email.Authentication = mergeAuthentication(input.Authentication, score, symbols)
+			if phishingReason != "" {
+				email.Authentication = markPhishing(email.Authentication, phishingReason)
+			}
 		}
 	}
 	email.RawSizeBytes = incomingRawSize(email, input)

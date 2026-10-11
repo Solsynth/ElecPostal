@@ -101,14 +101,15 @@ type MailConfig struct {
 
 // SpamConfig controls the inbound spam filter (weighted symbol rules plus an
 // optional global Bayes classifier). Symbol weights are fixed in code; only
-// the routing threshold, the header toggle and the Bayes tuning are
-// configurable.
+// the routing threshold, the header toggle, the DMARC-reject enforcement and
+// the Bayes tuning are configurable.
 type SpamConfig struct {
-	Enabled        bool        `mapstructure:"enabled"`
-	Threshold      float64     `mapstructure:"threshold"`
-	AddXSpamHeader bool        `mapstructure:"addXSpamHeader"`
-	Segmenter      string      `mapstructure:"segmenter"`
-	Bayes          BayesConfig `mapstructure:"bayes"`
+	Enabled            bool        `mapstructure:"enabled"`
+	Threshold          float64     `mapstructure:"threshold"`
+	AddXSpamHeader     bool        `mapstructure:"addXSpamHeader"`
+	EnforceDmarcReject bool        `mapstructure:"enforceDmarcReject"`
+	Segmenter          string      `mapstructure:"segmenter"`
+	Bayes              BayesConfig `mapstructure:"bayes"`
 }
 
 // BayesConfig tunes the global Bayes model shared by every mailbox.
@@ -243,6 +244,7 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("mail.spam.enabled", true)
 	v.SetDefault("mail.spam.threshold", 5.0)
 	v.SetDefault("mail.spam.addXSpamHeader", true)
+	v.SetDefault("mail.spam.enforceDmarcReject", true)
 	v.SetDefault("mail.spam.segmenter", "gse")
 	v.SetDefault("mail.spam.bayes.enabled", true)
 	v.SetDefault("mail.spam.bayes.minLearns", 100)

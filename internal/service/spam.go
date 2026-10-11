@@ -56,13 +56,7 @@ var spamSymbolWarnings = map[string]string{
 // exposes as Email.Authentication and what the X-Spam headers are derived
 // from. When authentication cannot be decoded the verifier bytes are kept.
 func mergeAuthentication(authentication datatypes.JSON, score float64, symbols []spam.Symbol) datatypes.JSON {
-	merged := map[string]any{}
-	if len(authentication) > 0 {
-		if err := json.Unmarshal(authentication, &merged); err != nil {
-			logging.Log.Warn().Err(err).Msg("decode sender authentication for merge")
-			merged = map[string]any{}
-		}
-	}
+	merged := decodeAuthentication(authentication)
 	merged["score"] = score
 	if len(symbols) > 0 {
 		merged["symbols"] = symbols
@@ -76,10 +70,65 @@ func mergeAuthentication(authentication datatypes.JSON, score float64, symbols [
 	if len(warnings) > 0 {
 		merged["warnings"] = warnings
 	}
+	return encodeAuthentication(merged, authentication)
+}
+
+// phishingWarningPrefix marks the terminal sender-forgery warning. It is
+// deliberately stronger than the "Possible phishing" wording of the scored
+// symbols: this verdict does not depend on a score.
+const phishingWarningPrefix = "Likely phishing: "
+
+// markPhishing records the terminal sender-forgery verdict in the
+// authentication document: the boolean a client keys its banner on, the
+// machine-readable reason, and the user-facing warning the API documents as a
+// sender-safety badge. It runs after mergeAuthentication so the verdict is
+// stored alongside the score, symbols and verifier warnings.
+func markPhishing(authentication datatypes.JSON, reason string) datatypes.JSON {
+	merged := decodeAuthentication(authentication)
+	merged["phishing"] = true
+	merged["phishing_reason"] = reason
+	warnings := stringSlice(merged["warnings"])
+	merged["warnings"] = appendUniqueString(warnings, phishingWarningPrefix+reason)
+	return encodeAuthentication(merged, authentication)
+}
+
+// phishingReasonOf reads the recorded phishing reason, "" when the message
+// carries no verdict.
+func phishingReasonOf(authentication datatypes.JSON) string {
+	if len(authentication) == 0 {
+		return ""
+	}
+	var decoded struct {
+		Reason string `json:"phishing_reason"`
+	}
+	if err := json.Unmarshal(authentication, &decoded); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(decoded.Reason)
+}
+
+// decodeAuthentication reads the authentication document into a mutable map.
+// Unreadable input degrades to an empty document, matching the historical
+// behavior of merging into a fresh map.
+func decodeAuthentication(authentication datatypes.JSON) map[string]any {
+	merged := map[string]any{}
+	if len(authentication) == 0 {
+		return merged
+	}
+	if err := json.Unmarshal(authentication, &merged); err != nil {
+		logging.Log.Warn().Err(err).Msg("decode sender authentication for merge")
+		return map[string]any{}
+	}
+	return merged
+}
+
+// encodeAuthentication marshals the merged document, keeping the previous
+// bytes when encoding fails so a verdict is never lost to a marshal error.
+func encodeAuthentication(merged map[string]any, fallback datatypes.JSON) datatypes.JSON {
 	encoded, err := json.Marshal(merged)
 	if err != nil {
 		logging.Log.Warn().Err(err).Msg("encode merged authentication")
-		return authentication
+		return fallback
 	}
 	return encoded
 }
@@ -129,17 +178,28 @@ func (s *EmailService) trainSpamFromMove(ctx context.Context, folder string, cur
 	}
 }
 
-// applySpamManifestHeaders adds the X-Spam headers that a stored spam message
-// carries in its protocol source. It is a no-op for non-spam mail and when
-// header injection is disabled.
+// applySpamManifestHeaders adds the filter verdict headers that a stored
+// message carries in its protocol source: X-Spam-* for mail filed in Spam, and
+// X-Phishing-* whenever the message carries a sender-forgery verdict. It is a
+// no-op when header injection is disabled.
 func (s *EmailService) applySpamManifestHeaders(manifest *mailmime.Manifest, email *database.Email) {
-	if manifest == nil || email == nil || !s.spamXSpamHeader || email.Folder != folderSpam {
+	if manifest == nil || email == nil || !s.spamXSpamHeader {
 		return
 	}
-	manifest.ExtraHeaders = append(manifest.ExtraHeaders,
-		mailmime.Header{Name: "X-Spam-Status", Value: "Yes"},
-		mailmime.Header{Name: "X-Spam-Score", Value: fmt.Sprintf("%.2f", authenticationScore(email.Authentication))},
-	)
+	if email.Folder == folderSpam {
+		manifest.ExtraHeaders = append(manifest.ExtraHeaders,
+			mailmime.Header{Name: "X-Spam-Status", Value: "Yes"},
+			mailmime.Header{Name: "X-Spam-Score", Value: fmt.Sprintf("%.2f", authenticationScore(email.Authentication))},
+		)
+	}
+	// The phishing verdict is independent of the folder: it stays visible when
+	// the user moves the message back out of Spam.
+	if reason := phishingReasonOf(email.Authentication); reason != "" {
+		manifest.ExtraHeaders = append(manifest.ExtraHeaders,
+			mailmime.Header{Name: "X-Phishing-Status", Value: "Yes"},
+			mailmime.Header{Name: "X-Phishing-Warning", Value: reason},
+		)
+	}
 }
 
 func stringSlice(value any) []string {

@@ -167,11 +167,12 @@ func New(cfg *config.Config) (*App, error) {
 			MinLearns:    cfg.Mail.Spam.Bayes.MinLearns,
 			MinTokens:    cfg.Mail.Spam.Bayes.MinTokens,
 			Segmenter:    segmenter,
-		}, bayesStore), cfg.Mail.Spam.Threshold, cfg.Mail.Spam.AddXSpamHeader)
+		}, bayesStore), cfg.Mail.Spam.Threshold, cfg.Mail.Spam.AddXSpamHeader, cfg.Mail.Spam.EnforceDmarcReject)
 		logging.Log.Info().
 			Float64("threshold", cfg.Mail.Spam.Threshold).
 			Bool("bayes", bayesStore != nil).
 			Bool("segmenter", segmenter != nil).
+			Bool("enforceDmarcReject", cfg.Mail.Spam.EnforceDmarcReject).
 			Msg("spam filter enabled")
 	}
 	switch cfg.Mail.Relay.Adapter {

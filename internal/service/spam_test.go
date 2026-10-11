@@ -79,7 +79,7 @@ func authJSON(t *testing.T, value string) datatypes.JSON {
 // and X-Spam headers in its stored protocol source.
 func TestReceiveEmailRoutesScoredSpam(t *testing.T) {
 	f := newNotificationFixture(t)
-	f.svc.SetSpamScorer(spam.NewService(spam.Config{}, nil), 5.0, true)
+	f.svc.SetSpamScorer(spam.NewService(spam.Config{}, nil), 5.0, true, true)
 
 	// SPF fail (1.5) + DKIM fail (1.5) + DMARC reject (2.0) = 5.0.
 	authentication := authJSON(t, `{"spf":"fail","dkim":"fail","dmarc":"reject","warnings":["Possible phishing: SPF verification failed"]}`)
@@ -155,7 +155,7 @@ func TestReceiveEmailRoutesScoredSpam(t *testing.T) {
 // score, and no spam headers.
 func TestReceiveEmailKeepsLowScoreInInbox(t *testing.T) {
 	f := newNotificationFixture(t)
-	f.svc.SetSpamScorer(spam.NewService(spam.Config{}, nil), 5.0, true)
+	f.svc.SetSpamScorer(spam.NewService(spam.Config{}, nil), 5.0, true, true)
 
 	email, err := f.svc.ReceiveEmail(context.Background(), ReceiveEmailInput{
 		MailboxID:      f.mailbox.ID,
@@ -190,7 +190,7 @@ func TestReceiveEmailKeepsLowScoreInInbox(t *testing.T) {
 // alone (5.0) routes to Spam.
 func TestReceiveEmailBlockRuleScoresWithoutAuthentication(t *testing.T) {
 	f := newNotificationFixture(t)
-	f.svc.SetSpamScorer(spam.NewService(spam.Config{}, nil), 5.0, true)
+	f.svc.SetSpamScorer(spam.NewService(spam.Config{}, nil), 5.0, true, true)
 	mailboxID, workspaceID := f.mailbox.ID, f.mailbox.WorkspaceID
 	if err := f.db.Create(&database.MailBlockRule{
 		AccountID: f.accountID, MailboxID: &mailboxID, WorkspaceID: &workspaceID,
@@ -268,7 +268,7 @@ func TestReceiveEmailSkipsScoringForDmarcIntake(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newNotificationFixture(t)
 			scorer := &fakeScorer{result: spam.Result{Score: 99}}
-			f.svc.SetSpamScorer(scorer, 5.0, true)
+			f.svc.SetSpamScorer(scorer, 5.0, true, true)
 
 			input := tc.input
 			input.MailboxID = f.mailbox.ID
@@ -295,7 +295,7 @@ func TestReceiveEmailSkipsScoringForDmarcIntake(t *testing.T) {
 func TestReceiveEmailScoresThroughFakeScorer(t *testing.T) {
 	f := newNotificationFixture(t)
 	scorer := &fakeScorer{result: spam.Result{Score: 6, Symbols: []spam.Symbol{{Name: "BAYES_SPAM", Weight: 6}}}}
-	f.svc.SetSpamScorer(scorer, 5.0, true)
+	f.svc.SetSpamScorer(scorer, 5.0, true, true)
 
 	email, err := f.svc.ReceiveEmail(context.Background(), ReceiveEmailInput{
 		MailboxID: f.mailbox.ID, FromAddress: "sender@remote.example", FromName: "Sender",
@@ -327,7 +327,7 @@ func TestReceiveEmailScoresThroughFakeScorer(t *testing.T) {
 func TestMoveEmailTrainsBayes(t *testing.T) {
 	f := newNotificationFixture(t)
 	scorer := &fakeScorer{}
-	f.svc.SetSpamScorer(scorer, 5.0, true)
+	f.svc.SetSpamScorer(scorer, 5.0, true, true)
 
 	email := database.Email{
 		AccountID: f.accountID, MailboxID: f.mailbox.ID, Subject: "Offer",
@@ -366,6 +366,150 @@ func TestMoveEmailTrainsBayes(t *testing.T) {
 	// Moving an unknown message is still ErrNotFound.
 	if err := f.svc.MoveEmail(context.Background(), f.accountID, database.NewID(), "spam"); err == nil {
 		t.Fatal("MoveEmail accepted an unknown message")
+	}
+}
+
+// TestReceiveEmailRoutesDmarcRejectSpoofToSpam: a spoofed From domain that
+// publishes p=reject is filed into Spam even though its weighted score (2.5)
+// never reaches the threshold, and the message carries the phishing verdict,
+// the warning clients badge, and X-Phishing headers in its stored source.
+func TestReceiveEmailRoutesDmarcRejectSpoofToSpam(t *testing.T) {
+	f := newNotificationFixture(t)
+	f.svc.SetSpamScorer(spam.NewService(spam.Config{}, nil), 5.0, true, true)
+
+	// The real sample: anthropic.com publishes ~all and p=reject, the message
+	// has no DKIM signature, so the verifier reports softfail/none/reject.
+	authentication := authJSON(t, `{"spf":"softfail","dkim":"none","dmarc":"reject","warnings":["Domain policy rejects unauthenticated mail"]}`)
+	email, err := f.svc.ReceiveEmail(context.Background(), ReceiveEmailInput{
+		MailboxID:      f.mailbox.ID,
+		FromAddress:    "support@anthropic.com",
+		FromName:       "Anthropic ©",
+		EnvelopeFrom:   "support@anthropic.com",
+		Subject:        "Important: Review Your Payment and Billing Details",
+		Body:           `<p>Please review and update your payment information.</p><a href="https://log.claude-ai.one/">Update account information</a>`,
+		ContentType:    "text/html",
+		Authentication: authentication,
+	})
+	if err != nil {
+		t.Fatalf("ReceiveEmail() error = %v", err)
+	}
+	if email.Folder != "spam" || email.SpamAt == nil {
+		t.Fatalf("folder/spam_at = %q/%v, want spam with a timestamp", email.Folder, email.SpamAt)
+	}
+
+	var decoded struct {
+		Score          float64  `json:"score"`
+		Phishing       bool     `json:"phishing"`
+		PhishingReason string   `json:"phishing_reason"`
+		Warnings       []string `json:"warnings"`
+	}
+	if err := json.Unmarshal(email.Authentication, &decoded); err != nil {
+		t.Fatalf("decode authentication %q: %v", email.Authentication, err)
+	}
+	if decoded.Score != 2.5 {
+		t.Fatalf("score = %v, want 2.5 below the 5.0 threshold", decoded.Score)
+	}
+	if !decoded.Phishing || decoded.PhishingReason != spam.PhishingRejectsUnauthenticatedMail {
+		t.Fatalf("phishing verdict = %v/%q, want true with the reject reason", decoded.Phishing, decoded.PhishingReason)
+	}
+	if countString(decoded.Warnings, "Likely phishing: "+spam.PhishingRejectsUnauthenticatedMail) != 1 {
+		t.Fatalf("warnings = %v, want exactly one phishing warning", decoded.Warnings)
+	}
+
+	manifest := storedManifest(t, f, email.ID)
+	if got := headerValue(manifest.ExtraHeaders, "X-Phishing-Status"); got != "Yes" {
+		t.Fatalf("X-Phishing-Status = %q, want Yes (headers %+v)", got, manifest.ExtraHeaders)
+	}
+	if got := headerValue(manifest.ExtraHeaders, "X-Phishing-Warning"); got != spam.PhishingRejectsUnauthenticatedMail {
+		t.Fatalf("X-Phishing-Warning = %q, want the verdict reason", got)
+	}
+	if got := headerValue(manifest.ExtraHeaders, "X-Spam-Status"); got != "Yes" {
+		t.Fatalf("X-Spam-Status = %q, want Yes for a Spam-filed message", got)
+	}
+	source, err := f.svc.OpenProtocolMessage(context.Background(), email.ID)
+	if err != nil {
+		t.Fatalf("OpenProtocolMessage() error = %v", err)
+	}
+	rendered, err := mailmime.RenderBytes(context.Background(), source)
+	if err != nil {
+		t.Fatalf("RenderBytes() error = %v", err)
+	}
+	if !strings.Contains(string(rendered), "X-Phishing-Status: Yes\r\n") ||
+		!strings.Contains(string(rendered), "X-Phishing-Warning: "+spam.PhishingRejectsUnauthenticatedMail+"\r\n") {
+		t.Fatalf("rendered source lacks the X-Phishing headers:\n%s", rendered)
+	}
+}
+
+// TestReceiveEmailMarksPhishingWithoutEnforcement: with enforcement disabled
+// the spoof stays in Inbox but is still marked, so clients can warn about it.
+func TestReceiveEmailMarksPhishingWithoutEnforcement(t *testing.T) {
+	f := newNotificationFixture(t)
+	f.svc.SetSpamScorer(spam.NewService(spam.Config{}, nil), 5.0, true, false)
+
+	email, err := f.svc.ReceiveEmail(context.Background(), ReceiveEmailInput{
+		MailboxID:      f.mailbox.ID,
+		FromAddress:    "support@anthropic.com",
+		Subject:        "Important: Review Your Payment and Billing Details",
+		Body:           "Please review and update your payment information.",
+		ContentType:    "text/plain",
+		Authentication: authJSON(t, `{"spf":"softfail","dkim":"none","dmarc":"reject"}`),
+	})
+	if err != nil {
+		t.Fatalf("ReceiveEmail() error = %v", err)
+	}
+	if email.Folder != "inbox" || email.SpamAt != nil {
+		t.Fatalf("folder/spam_at = %q/%v, want inbox with no spam timestamp", email.Folder, email.SpamAt)
+	}
+	var decoded struct {
+		Phishing bool `json:"phishing"`
+	}
+	if err := json.Unmarshal(email.Authentication, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !decoded.Phishing {
+		t.Fatalf("authentication = %q, want the phishing verdict recorded", email.Authentication)
+	}
+	manifest := storedManifest(t, f, email.ID)
+	if got := headerValue(manifest.ExtraHeaders, "X-Phishing-Status"); got != "Yes" {
+		t.Fatalf("X-Phishing-Status = %q, want Yes even outside Spam", got)
+	}
+	if got := headerValue(manifest.ExtraHeaders, "X-Spam-Status"); got != "" {
+		t.Fatalf("X-Spam-Status = %q, want no spam header for Inbox mail", got)
+	}
+}
+
+// TestReceiveEmailUnauthenticatedDomainIsNotPhishing: a domain without a DMARC
+// record leaves the verdict unset and the message in Inbox, so the terminal
+// rule cannot punish senders who never published a policy.
+func TestReceiveEmailUnauthenticatedDomainIsNotPhishing(t *testing.T) {
+	f := newNotificationFixture(t)
+	f.svc.SetSpamScorer(spam.NewService(spam.Config{}, nil), 5.0, true, true)
+
+	email, err := f.svc.ReceiveEmail(context.Background(), ReceiveEmailInput{
+		MailboxID:      f.mailbox.ID,
+		FromAddress:    "sender@no-dmarc.example",
+		Subject:        "Meeting notes",
+		Body:           "Here are the notes from today.",
+		ContentType:    "text/plain",
+		Authentication: authJSON(t, `{"spf":"none","dkim":"none","dmarc":"none"}`),
+	})
+	if err != nil {
+		t.Fatalf("ReceiveEmail() error = %v", err)
+	}
+	if email.Folder != "inbox" {
+		t.Fatalf("folder = %q, want inbox without a published reject policy", email.Folder)
+	}
+	var decoded struct {
+		Phishing bool `json:"phishing"`
+	}
+	if err := json.Unmarshal(email.Authentication, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Phishing {
+		t.Fatalf("authentication = %q, want no phishing verdict", email.Authentication)
+	}
+	if headers := storedManifest(t, f, email.ID).ExtraHeaders; len(headers) != 0 {
+		t.Fatalf("unmarked mail carries headers: %+v", headers)
 	}
 }
 

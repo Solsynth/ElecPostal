@@ -79,7 +79,8 @@ tlsSkipVerify = false
 # its stored source. Mail is never rejected at SMTP.
 enabled = true
 threshold = 5.0            # score at or above which a message is routed to Spam. A single auth failure (<= 1.5) is never enough on its own
-addXSpamHeader = true      # write X-Spam-Status/X-Spam-Score into the stored protocol source
+addXSpamHeader = true      # write filter verdict headers into the stored protocol source: X-Spam-Status/X-Spam-Score for Spam mail, and X-Phishing-Status/X-Phishing-Warning for mail carrying a phishing verdict
+enforceDmarcReject = true  # file mail from a domain publishing a DMARC p=reject policy straight into Spam when it aligned with neither SPF nor DKIM, regardless of score. Such mail is also marked as phishing (authentication.phishing, an added warning, X-Phishing-* headers) even when this is false
 segmenter = "gse"          # Chinese/Japanese word segmentation for the Bayes model: "gse" (pure-Go jieba with an embedded dictionary, adds ~8 MB to the binary) or "" for dictionary-free character bigrams. Latin text tokenizes identically either way; switching changes CJK features, so clear the Bayes model when you change it
 
 [mail.spam.bayes]

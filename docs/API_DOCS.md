@@ -378,6 +378,8 @@ accepted from `POST /api/emails`.
     "dkim": "fail",
     "dmarc": "reject",
     "score": 5.5,
+    "phishing": true,
+    "phishing_reason": "Sender domain rejects unauthenticated mail (DMARC p=reject)",
     "symbols": [
       { "name": "R_SPF_FAIL", "weight": 1.5 },
       { "name": "R_DKIM_REJECT", "weight": 1.5 },
@@ -387,7 +389,8 @@ accepted from `POST /api/emails`.
     "warnings": [
       "Possible phishing: SPF verification failed",
       "Possible forgery: DKIM signature is invalid",
-      "Domain policy rejects unauthenticated mail"
+      "Domain policy rejects unauthenticated mail",
+      "Likely phishing: Sender domain rejects unauthenticated mail (DMARC p=reject)"
     ]
   }
 }
@@ -400,6 +403,17 @@ policy. A missing record (`none`) or temporary DNS failure does not by itself
 move mail to Spam, but may increase `score`. Explicit verification failures are
 retained in Spam and do not trigger push notifications.
 
+`phishing` is set, with the `phishing_reason` that explains it, when the From
+domain publishes a DMARC reject policy and the message aligned with neither SPF
+nor DKIM — the domain owner has declared that mail like this is forged. The
+verdict is terminal: such mail is filed into Spam regardless of `score`
+(`mail.spam.enforceDmarcReject`, default `true`), because the sender-auth
+symbols alone cap below the routing threshold. Clients should surface it more
+prominently than a plain Spam filing, and it remains in the document when the
+message is moved out of Spam. `phishing` is always accompanied by the
+`Likely phishing: …` warning in `warnings`, and the reason is ASCII so it can
+also be written as a header.
+
 `score` is the signed sum of the fired `symbols` (rspamd semantics), not a
 0-100 scale, and `symbols` lists each rule hit with its weight. Verification and
 scoring run for unauthenticated inbound SMTP only; messages submitted by an
@@ -407,8 +421,10 @@ authenticated client carry no `authentication` object. Mail whose score reaches
 `mail.spam.threshold` is filed into Spam, and its stored source (and therefore
 `GET /api/emails/{email-id}/eml`, IMAP, POP3, and JMAP) carries
 `X-Spam-Status: Yes` and `X-Spam-Score` headers when
-`mail.spam.addXSpamHeader` is enabled. Mail is never rejected at SMTP time:
-a scoring or DNS failure leaves the message in the Inbox.
+`mail.spam.addXSpamHeader` is enabled. Mail carrying a phishing verdict carries
+`X-Phishing-Status: Yes` and `X-Phishing-Warning` in the same source, whether or
+not it is in Spam. Mail is never rejected at SMTP time: a scoring or DNS failure
+leaves the message in the Inbox.
 
 `warnings` is deduplicated and includes one entry per strong symbol:
 
@@ -419,6 +435,7 @@ a scoring or DNS failure leaves the message in the Inbox.
 | `DMARC_POLICY_REJECT` | `Domain policy rejects unauthenticated mail` |
 | `DMARC_POLICY_QUARANTINE` | `Domain policy quarantines unauthenticated mail` |
 | `BLOCK_RULE` | `Sender is blocked by a mailbox block rule` |
+| phishing verdict | `Likely phishing: Sender domain rejects unauthenticated mail (DMARC p=reject)` |
 
 ### Conversations
 
@@ -602,9 +619,10 @@ Move a message explicitly with `POST /api/emails/{email-id}/move`:
 
 `POST /api/emails/{email-id}/spam` moves a message to Spam, while
 `POST /api/emails/{email-id}/not-spam` restores it to Inbox. Incoming mail that
-matches a block rule, fails sender authentication, or matches the built-in
-conservative spam heuristic is retained in Spam for review. Authentication
-warnings remain attached to the message after it is restored to Inbox.
+matches a block rule, arrives from a domain publishing a DMARC reject policy
+without SPF or DKIM alignment, or reaches the spam threshold is retained in Spam
+for review. Authentication warnings, including the phishing verdict, remain
+attached to the message after it is restored to Inbox.
 
 ### Scheduled and HTML email
 
